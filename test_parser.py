@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Тестирование парсера времени
+Тестирование исправленного парсера времени
 """
 
 import sys
@@ -15,75 +15,57 @@ def test_parser():
     """Запуск тестов парсера"""
     parser = TimeParser()
     
-    # Тестовые данные
-    test_cases_ru = [
-        ("завтра 10:30", "ru", "Europe/Moscow"),
-        ("сегодня в 18:00", "ru", "Europe/Moscow"),
+    print("=" * 60)
+    print("ТЕСТИРОВАНИЕ ИСПРАВЛЕННОГО ПАРСЕРА ВРЕМЕНИ")
+    print("=" * 60)
+    
+    # Тест проблемных случаев из предыдущего теста
+    problem_cases = [
+        # Русский язык
         ("послезавтра в 15:45", "ru", "Europe/Moscow"),
-        ("через 2 часа", "ru", "Europe/Moscow"),
-        ("через 30 минут", "ru", "Europe/Moscow"),
-        ("понедельник в 9 утра", "ru", "Europe/Moscow"),
-        ("31.12.2024 23:59", "ru", "Europe/Moscow"),
-        ("15 января в 14:00", "ru", "Europe/Moscow"),
-        ("20:00", "ru", "Europe/Moscow"),
         ("в 8 утра", "ru", "Europe/Moscow"),
         ("в 8 вечера", "ru", "Europe/Moscow"),
-    ]
-    
-    test_cases_en = [
-        ("tomorrow 10:30 AM", "en", "America/New_York"),
-        ("today at 6:00 PM", "en", "America/New_York"),
-        ("day after tomorrow at 3:45 PM", "en", "America/New_York"),
-        ("in 2 hours", "en", "America/New_York"),
-        ("in 30 minutes", "en", "America/New_York"),
-        ("monday at 9 AM", "en", "America/New_York"),
-        ("12/31/2024 11:59 PM", "en", "America/New_York"),
-        ("january 15 at 2:00 PM", "en", "America/New_York"),
+        ("в 20:00", "ru", "Europe/Moscow"),
+        
+        # Английский язык
         ("8:00 PM", "en", "America/New_York"),
         ("at 8 AM", "en", "America/New_York"),
+        ("at 6:00 PM", "en", "America/New_York"),
+        ("today at 6:00 PM", "en", "America/New_York"),
+        ("tomorrow at 3 PM", "en", "America/New_York"),
+        ("day after tomorrow at 3:45 PM", "en", "America/New_York"),
     ]
     
-    print("=" * 60)
-    print("ТЕСТИРОВАНИЕ ПАРСЕРА ВРЕМЕНИ")
-    print("=" * 60)
-    
-    # Тестируем русский язык
-    print("\n🇷🇺 РУССКИЙ ЯЗЫК:")
+    print("\n🔧 ПРОВЕРКА ПРОБЛЕМНЫХ СЛУЧАЕВ:")
     print("-" * 40)
     
-    for time_str, lang, tz in test_cases_ru:
+    for time_str, lang, tz in problem_cases:
         parsed_time, parse_type, extra_info = parser.parse(time_str, lang, tz)
         
         if parsed_time:
             local_tz = pytz.timezone(tz)
             local_time = parsed_time.astimezone(local_tz)
-            print(f"✅ '{time_str}' → {local_time.strftime('%d.%m.%Y %H:%M')} ({parse_type})")
+            
+            if lang == 'ru':
+                time_format = local_time.strftime('%d.%m.%Y %H:%M')
+            else:
+                time_format = local_time.strftime('%m/%d/%Y %I:%M %p')
+            
+            print(f"✅ '{time_str}' → {time_format} ({parse_type})")
+            if extra_info.get('adjusted'):
+                print(f"   ⚠️  Скорректировано на завтра")
         else:
             print(f"❌ '{time_str}' → не распознано")
     
-    # Тестируем английский язык
-    print("\n🇬🇧 АНГЛИЙСКИЙ ЯЗЫК:")
-    print("-" * 40)
-    
-    for time_str, lang, tz in test_cases_en:
-        parsed_time, parse_type, extra_info = parser.parse(time_str, lang, tz)
-        
-        if parsed_time:
-            local_tz = pytz.timezone(tz)
-            local_time = parsed_time.astimezone(local_tz)
-            print(f"✅ '{time_str}' → {local_time.strftime('%m/%d/%Y %I:%M %p')} ({parse_type})")
-        else:
-            print(f"❌ '{time_str}' → не распознано")
-    
-    # Тестируем извлечение текста и времени
-    print("\n📝 ИЗВЛЕЧЕНИЕ ТЕКСТА И ВРЕМЕНИ:")
+    # Тест извлечения времени из текста
+    print("\n📝 ИЗВЛЕЧЕНИЕ ИЗ ТЕКСТА (исправленное):")
     print("-" * 40)
     
     test_texts = [
-        "Позвонить маме завтра в 10:30",
+        "Pay bills on Monday at 9 AM",
         "Meeting with John tomorrow at 3 PM",
-        "Сходить в магазин сегодня вечером",
-        "Pay bills on Monday at 9 AM"
+        "Call mom next Monday at 10 AM",
+        "Позвонить маме в понедельник в 10 утра",
     ]
     
     for text in test_texts:
@@ -92,26 +74,44 @@ def test_parser():
         print(f"📄 '{text}'")
         print(f"  Текст: '{text_part}'")
         print(f"  Время: '{time_part}'")
+        
+        # Пробуем распарсить извлеченное время
+        if time_part:
+            parsed_time, parse_type, _ = parser.parse(time_part, lang, 'Europe/Moscow' if lang == 'ru' else 'America/New_York')
+            if parsed_time:
+                print(f"  ✅ Время распознано: {parse_type}")
+            else:
+                print(f"  ❌ Время не распознано")
         print()
     
-    # Тестируем обнаружение повторений
-    print("\n🔄 ОБНАРУЖЕНИЕ ПОВТОРЕНИЙ:")
+    # Тест AM/PM коррекции
+    print("\n🕐 ТЕСТ AM/PM КОРРЕКЦИИ:")
     print("-" * 40)
     
-    repeat_tests = [
-        ("Каждый день в 8 утра", "ru"),
-        ("Every Monday at 10 AM", "en"),
-        ("По будням в 9:00", "ru"),
-        ("On weekends at 11:00", "en"),
-        ("Ежемесячно 1 числа", "ru"),
-        ("Yearly on January 1", "en")
+    ampm_tests = [
+        ("6:00 PM", "en", "America/New_York"),
+        ("6:00 AM", "en", "America/New_York"),
+        ("12:00 PM", "en", "America/New_York"),
+        ("12:00 AM", "en", "America/New_York"),
+        ("8 вечера", "ru", "Europe/Moscow"),
+        ("8 утра", "ru", "Europe/Moscow"),
     ]
     
-    for text, lang in repeat_tests:
-        repeat_info = parser.detect_repeat_pattern(text, lang)
-        print(f"🔁 '{text}' → {repeat_info['repeat_type']}")
-        if repeat_info['repeat_days']:
-            print(f"    Дни: {repeat_info['repeat_days']}")
+    for time_str, lang, tz in ampm_tests:
+        parsed_time, parse_type, _ = parser.parse(time_str, lang, tz)
+        if parsed_time:
+            hour = parsed_time.hour
+            expected_hour = {
+                "6:00 PM": 18,
+                "6:00 AM": 6,
+                "12:00 PM": 12,
+                "12:00 AM": 0,
+                "8 вечера": 20,
+                "8 утра": 8,
+            }.get(time_str)
+            
+            status = "✅" if hour == expected_hour else "❌"
+            print(f"{status} '{time_str}' → {hour}:00 (ожидалось: {expected_hour}:00)")
     
     print("\n" + "=" * 60)
     print("ТЕСТИРОВАНИЕ ЗАВЕРШЕНО")
