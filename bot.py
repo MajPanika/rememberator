@@ -49,6 +49,9 @@ reminder_manager = ReminderManager(db, bot)
 admin_panel = AdminPanel(db, bot)
 recovery_system = RecoverySystem(db, bot)
 
+# После других инициализаций
+time_parser = TimeParser()
+
 # Состояния FSM
 class ReminderState(StatesGroup):
     waiting_for_text = State()
@@ -59,6 +62,8 @@ class ReminderState(StatesGroup):
 class SettingsState(StatesGroup):
     waiting_for_language = State()
     waiting_for_timezone = State()
+
+
 
 # ===== ОСНОВНЫЕ КОМАНДЫ =====
 
@@ -276,6 +281,195 @@ async def add_reminder_start(message: types.Message, state: FSMContext):
     
     await state.set_state(ReminderState.waiting_for_text)
 
+@dp.message(ReminderState.waiting_for_text)
+async def process_reminder_text(message: types.Message, state: FSMContext):
+    """Обработка текста напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    # Сохраняем текст напоминания
+    await state.update_data(text=message.text)
+    
+    # Пробуем извлечь время из текста
+    language = user.get('language_code', 'ru')
+    text_part, time_part = time_parser.extract_reminder_text(message.text, language)
+    
+    if time_part:
+        # Время найдено в тексте
+        await state.update_data(text=text_part, extracted_time=time_part)
+        
+        # Запрашиваем подтверждение времени
+        confirm_text = {
+            'ru': f"📝 *Текст напоминания:* {text_part}\n\n"
+                  f"⏰ *Распознанное время:* {time_part}\n\n"
+                  "Верно ли распознано время?",
+            'en': f"📝 *Reminder text:* {text_part}\n\n"
+                  f"⏰ *Recognized time:* {time_part}\n\n"
+                  "Is the time correct?"
+        }
+        
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text="✅ Да" if language == 'ru' else "✅ Yes",
+                callback_data="time_correct"
+            ),
+            InlineKeyboardButton(
+                text="❌ Нет" if language == 'ru' else "❌ No",
+                callback_data="time_wrong"
+            )
+        )
+        
+        await message.answer(
+            confirm_text.get(language, confirm_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=builder.as_markup()
+        )
+        
+        await state.set_state(ReminderState.waiting_for_date)
+    else:
+        # Время не найдено, запрашиваем отдельно
+        await state.update_data(text=message.text)
+        
+        date_request = {
+            'ru': "📅 *Теперь укажите время напоминания*\n\n"
+                  "Примеры:\n"
+                  "• Завтра 10:30\n"
+                  "• Сегодня в 18:00\n"
+                  "• Через 2 часа\n"
+                  "• Понедельник в 9 утра\n\n"
+                  "Или выберите дату из календаря:",
+            'en': "📅 *Now specify the reminder time*\n\n"
+                  "Examples:\n"
+                  "• Tomorrow 10:30 AM\n"
+                  "• Today at 6:00 PM\n"
+                  "• In 2 hours\n"
+                  "• Monday at 9 AM\n\n"
+                  "Or choose date from calendar:"
+        }
+        
+        from keyboards.main_menu import get_cancel_keyboard
+        keyboard = get_cancel_keyboard(language)
+        
+        await message.answer(
+            date_request.get(language, date_request['ru']),
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        
+        await state.set_state(ReminderState.waiting_for_date)
+
+@dp.message(ReminderState.waiting_for_date)
+async def process_reminder_date(message: types.Message, state: FSMContext):
+    """Обработка даты и времени напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Проверяем отмену
+    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel"]
+    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
+        await state.clear()
+        from keyboards.main_menu import get_main_keyboard
+        await message.answer(
+            "❌ Создание напоминания отменено" if language == 'ru' else "❌ Reminder creation cancelled",
+            reply_markup=get_main_keyboard(language)
+        )
+        return
+    
+    # Парсим время
+    parsed_time, parse_type, extra_info = time_parser.parse(
+        message.text, language, timezone
+    )
+    
+    if not parsed_time:
+        # Не удалось распознать время
+        error_text = {
+            'ru': "❌ Не удалось распознать время.\n\n"
+                  "Попробуйте еще раз:\n"
+                  "• Завтра 10:30\n"
+                  "• Сегодня в 18:00\n"
+                  "• Через 2 часа\n"
+                  "• 31.12.2024 23:59",
+            'en': "❌ Could not recognize time.\n\n"
+                  "Try again:\n"
+                  "• Tomorrow 10:30 AM\n"
+                  "• Today at 6:00 PM\n"
+                  "• In 2 hours\n"
+                  "• 12/31/2024 11:59 PM"
+        }
+        
+        await message.answer(
+            error_text.get(language, error_text['en']),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Проверяем корректность времени
+    is_valid, error_msg = time_parser.validate_time(parsed_time)
+    if not is_valid:
+        await message.answer(f"❌ {error_msg}")
+        return
+    
+    # Сохраняем время в состоянии
+    user_data = await state.get_data()
+    text = user_data.get('text', '')
+    
+    # Обновляем данные в состоянии
+    await state.update_data(
+        parsed_time=parsed_time.isoformat(),
+        timezone=timezone
+    )
+    
+    # Показываем подтверждение
+    formatted_time = time_parser.format_local_time(parsed_time, timezone, language)
+    
+    confirm_text = {
+        'ru': f"✅ *Время распознано*\n\n"
+              f"📝 *Текст:* {text}\n"
+              f"⏰ *Время:* {formatted_time}\n\n"
+              "Это повторяющееся напоминание?",
+        'en': f"✅ *Time recognized*\n\n"
+              f"📝 *Text:* {text}\n"
+              f"⏰ *Time:* {formatted_time}\n\n"
+              "Is this a repeating reminder?"
+    }
+    
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
+    builder = InlineKeyboardBuilder()
+    
+    if language == 'ru':
+        builder.row(
+            InlineKeyboardButton(text="✅ Разовое", callback_data="repeat_once"),
+            InlineKeyboardButton(text="🔄 Ежедневное", callback_data="repeat_daily"),
+            InlineKeyboardButton(text="📅 Еженедельное", callback_data="repeat_weekly")
+        )
+        builder.row(
+            InlineKeyboardButton(text="❌ Отмена", callback_data="repeat_cancel")
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="✅ One-time", callback_data="repeat_once"),
+            InlineKeyboardButton(text="🔄 Daily", callback_data="repeat_daily"),
+            InlineKeyboardButton(text="📅 Weekly", callback_data="repeat_weekly")
+        )
+        builder.row(
+            InlineKeyboardButton(text="❌ Cancel", callback_data="repeat_cancel")
+        )
+    
+    await message.answer(
+        confirm_text.get(language, confirm_text['ru']),
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+    
+    await state.set_state(ReminderState.waiting_for_repeat)
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 
 async def send_reminder_notification(reminder: dict):
