@@ -21,6 +21,7 @@ from timezone_handler import TimezoneHandler
 from reminder_manager import ReminderManager
 from admin_panel import AdminPanel
 from recovery_system import RecoverySystem
+from utils.time_parser import TimeParser
 
 # Настройка логирования
 logging.basicConfig(
