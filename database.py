@@ -260,7 +260,20 @@ class Database:
                     ORDER BY created_at DESC
                 ''', (user_id,))
             
-            return [dict(row) for row in cursor.fetchall()]
+            results = cursor.fetchall()
+            
+            # Конвертируем Row в dict и убедимся, что время - строка
+            reminders = []
+            for row in results:
+                reminder = dict(row)
+                # Если время - datetime, конвертируем в строку
+                if isinstance(reminder.get('remind_time_utc'), datetime):
+                    reminder['remind_time_utc'] = reminder['remind_time_utc'].isoformat()
+                if isinstance(reminder.get('next_remind_time_utc'), datetime):
+                    reminder['next_remind_time_utc'] = reminder['next_remind_time_utc'].isoformat()
+                reminders.append(reminder)
+            
+            return reminders
     
     def get_due_reminders(self) -> List[Dict]:
         """Получить напоминания, которые нужно отправить сейчас"""
@@ -275,7 +288,20 @@ class Database:
                 AND r.next_remind_time_utc <= datetime('now')
                 ORDER BY r.next_remind_time_utc
             ''')
-            return [dict(row) for row in cursor.fetchall()]
+            results = cursor.fetchall()
+            
+            # Конвертируем Row в dict и убедимся, что время - строка
+            reminders = []
+            for row in results:
+                reminder = dict(row)
+                # Если время - datetime, конвертируем в строку
+                if isinstance(reminder.get('remind_time_utc'), datetime):
+                    reminder['remind_time_utc'] = reminder['remind_time_utc'].isoformat()
+                if isinstance(reminder.get('next_remind_time_utc'), datetime):
+                    reminder['next_remind_time_utc'] = reminder['next_remind_time_utc'].isoformat()
+                reminders.append(reminder)
+            
+            return reminders
     
     def mark_reminder_sent(self, reminder_id: int):
         """Пометить напоминание как отправленное"""
@@ -478,13 +504,20 @@ class Database:
         """Рассчитать следующее время для повторяющегося напоминания"""
         from datetime import datetime, timedelta
         
+        # Если current_time - строка, конвертируем в datetime
+        if isinstance(current_time, str):
+            current_time = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+        
         if repeat_type == 'daily':
-            return current_time + timedelta(days=repeat_interval)
+            next_time = current_time + timedelta(days=repeat_interval)
         elif repeat_type == 'weekly':
             # current_time должен быть смещен на 7 дней
-            return current_time + timedelta(days=7)
+            next_time = current_time + timedelta(days=7)
         else:
-            return current_time
+            next_time = current_time
+        
+        # Возвращаем строку в ISO формате
+        return next_time.isoformat()
     
     def backup_database(self):
         """Создать резервную копию БД"""
