@@ -87,7 +87,12 @@ async def send_reminder_notification(reminder: dict):
         user_lang = reminder.get('language_code', 'ru')
         
         # Форматируем время для пользователя
-        remind_time = datetime.fromisoformat(reminder['remind_time_utc'])
+        # Проблема: remind_time_utc может быть строкой или datetime
+        remind_time = reminder['remind_time_utc']
+        if isinstance(remind_time, str):
+            remind_time = datetime.fromisoformat(remind_time)
+        # Если это уже datetime, оставляем как есть
+        
         formatted_time = format_local_time(
             remind_time, user_timezone, user_lang
         )
@@ -1039,8 +1044,11 @@ async def cmd_list(message: types.Message):
     }.get(language, f"📋 Your reminders ({len(reminders)}):\n\n")
     
     for i, reminder in enumerate(limited_reminders, 1):
-        # Форматируем время
-        remind_time = datetime.fromisoformat(reminder['remind_time_utc'])
+        # Форматируем время (с проверкой типа)
+        remind_time = reminder['remind_time_utc']
+        if isinstance(remind_time, str):
+            remind_time = datetime.fromisoformat(remind_time)
+        
         formatted_time = format_local_time(remind_time, timezone, language)
         
         # Тип повторения
@@ -1061,7 +1069,22 @@ async def cmd_list(message: types.Message):
         response_text += f"{i}. *ID: {reminder['id']}*\n"
         response_text += f"   {repeat_symbol} {reminder['text']}\n"
         response_text += f"   ⏰ {formatted_time}\n"
-        response_text += f"   {repeat_text}\n\n"
+        
+        if repeat_text:
+            response_text += f"   {repeat_text}\n"
+        
+        # Для еженедельных показываем дни
+        if repeat_type == 'weekly' and reminder.get('repeat_days'):
+            days_list = [int(d) for d in reminder['repeat_days'].split(',')] if reminder['repeat_days'] else []
+            weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            weekdays = weekdays_ru if language == 'ru' else weekdays_en
+            
+            selected_days = [weekdays[d] for d in days_list]
+            days_str = ", ".join(selected_days)
+            response_text += f"   📅 ({days_str})\n"
+        
+        response_text += "\n"
     
     if len(reminders) > 10:
         more_text = {
