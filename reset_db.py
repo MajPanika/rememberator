@@ -2,6 +2,7 @@
 import os
 import sqlite3
 
+
 # Удаляем старую БД
 if os.path.exists('reminders.db'):
     os.remove('reminders.db')
