@@ -286,6 +286,7 @@ class Database:
                 WHERE r.is_active = 1 
                 AND r.is_paused = 0
                 AND r.next_remind_time_utc <= datetime('now')
+                AND (r.last_processed IS NULL OR r.last_processed < r.next_remind_time_utc)
                 ORDER BY r.next_remind_time_utc
             ''')
             results = cursor.fetchall()
@@ -307,33 +308,64 @@ class Database:
         """Пометить напоминание как отправленное"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE reminders 
-                SET notified_count = notified_count + 1,
-                    last_processed = CURRENT_TIMESTAMP
-                WHERE id = ?
-            ''', (reminder_id,))
             
-            # Для повторяющихся напоминаний рассчитываем следующее время
+            # Сначала получаем информацию о напоминании
             cursor.execute('''
-                SELECT repeat_type, repeat_days, repeat_interval, next_remind_time_utc
+                SELECT repeat_type, next_remind_time_utc, remind_time_utc
                 FROM reminders 
-                WHERE id = ?
+                WHERE id = ? AND is_active = 1
             ''', (reminder_id,))
             
             row = cursor.fetchone()
-            if row and row['repeat_type'] != 'once':
-                next_time = self._calculate_next_remind_time(
-                    row['next_remind_time_utc'],
-                    row['repeat_type'],
-                    row['repeat_days'],
-                    row['repeat_interval']
-                )
+            if not row:
+                logger.warning(f"Reminder {reminder_id} not found or not active")
+                return
+            
+            repeat_type = row['repeat_type']
+            next_remind_time = row['next_remind_time_utc']
+            
+            # Для разовых напоминаний - деактивируем
+            if repeat_type == 'once':
                 cursor.execute('''
                     UPDATE reminders 
-                    SET next_remind_time_utc = ?
+                    SET is_active = 0,
+                        notified_count = notified_count + 1,
+                        last_processed = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (next_time, reminder_id))
+                ''', (reminder_id,))
+                logger.info(f"One-time reminder {reminder_id} marked as completed")
+            
+            # Для повторяющихся - обновляем следующее время
+            else:
+                # Если next_remind_time - строка, конвертируем в datetime
+                if isinstance(next_remind_time, str):
+                    next_remind_time = datetime.fromisoformat(next_remind_time.replace('Z', '+00:00'))
+                
+                # Рассчитываем следующее время
+                cursor.execute('''
+                    SELECT repeat_type, repeat_days, repeat_interval
+                    FROM reminders 
+                    WHERE id = ?
+                ''', (reminder_id,))
+                
+                repeat_info = cursor.fetchone()
+                if repeat_info:
+                    next_time = self._calculate_next_remind_time(
+                        next_remind_time,
+                        repeat_info['repeat_type'],
+                        repeat_info['repeat_days'],
+                        repeat_info['repeat_interval']
+                    )
+                    
+                    cursor.execute('''
+                        UPDATE reminders 
+                        SET notified_count = notified_count + 1,
+                            last_processed = CURRENT_TIMESTAMP,
+                            next_remind_time_utc = ?
+                        WHERE id = ?
+                    ''', (next_time, reminder_id))
+                    
+                    logger.info(f"Repeating reminder {reminder_id} updated, next time: {next_time}")
     
     def delete_reminder(self, reminder_id: int, user_id: int) -> bool:
         """Удалить напоминание"""
@@ -510,11 +542,37 @@ class Database:
         
         if repeat_type == 'daily':
             next_time = current_time + timedelta(days=repeat_interval)
+        
         elif repeat_type == 'weekly':
-            # current_time должен быть смещен на 7 дней
-            next_time = current_time + timedelta(days=7)
+            if repeat_days:
+                # Получаем список дней недели
+                days_list = [int(d) for d in repeat_days.split(',')]
+                
+                # Находим следующий день недели
+                current_weekday = current_time.weekday()
+                next_day = None
+                
+                # Ищем следующий день из списка
+                for day in sorted(days_list):
+                    if day > current_weekday:
+                        next_day = day
+                        break
+                
+                # Если не нашли в этой неделе, берем первый день следующей недели
+                if next_day is None:
+                    next_day = min(days_list)
+                    days_ahead = 7 - current_weekday + next_day
+                else:
+                    days_ahead = next_day - current_weekday
+                
+                next_time = current_time + timedelta(days=days_ahead)
+            else:
+                # Если дни не указаны, просто +7 дней
+                next_time = current_time + timedelta(days=7)
+        
         else:
-            next_time = current_time
+            # Для разовых или неизвестных типов возвращаем None
+            return None
         
         # Возвращаем строку в ISO формате
         return next_time.isoformat()
