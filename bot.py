@@ -141,10 +141,21 @@ async def check_and_send_reminders():
         
         logger.info(f"Found {len(due_reminders)} due reminders")
         
-        # Отправляем каждое напоминание
         for reminder in due_reminders:
-            await send_reminder_notification(reminder)
-            await asyncio.sleep(0.1)  # Чтобы не превысить лимиты Telegram
+            try:
+                await send_reminder_notification(reminder)
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"Failed to send reminder {reminder['id']}: {e}")
+                # Увеличиваем счетчик ошибок
+                with db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE reminders 
+                        SET error_count = error_count + 1 
+                        WHERE id = ?
+                    ''', (reminder['id'],))
             
     except Exception as e:
         logger.error(f"Error in check_and_send_reminders: {e}")
