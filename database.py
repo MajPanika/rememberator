@@ -207,19 +207,27 @@ class Database:
             if count >= Config.MAX_REMINDERS_PER_USER:
                 raise ValueError(f"Достигнут лимит в {Config.MAX_REMINDERS_PER_USER} напоминаний")
             
+            # Конвертируем datetime в строку для хранения
+            if isinstance(remind_time_utc, datetime):
+                remind_time_str = remind_time_utc.isoformat()
+            else:
+                remind_time_str = str(remind_time_utc)
+            
             # Определяем следующее время для повторяющихся
-            next_remind_time = remind_time_utc
+            next_remind_time = remind_time_str
             if repeat_type != 'once':
                 next_remind_time = self._calculate_next_remind_time(
                     remind_time_utc, repeat_type, repeat_days, repeat_interval
                 )
+                if isinstance(next_remind_time, datetime):
+                    next_remind_time = next_remind_time.isoformat()
             
             cursor.execute('''
                 INSERT INTO reminders 
                 (user_id, text, remind_time_utc, repeat_type, repeat_days, 
                  repeat_interval, timezone, next_remind_time_utc)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, text, remind_time_utc, repeat_type, repeat_days, 
+            ''', (user_id, text, remind_time_str, repeat_type, repeat_days, 
                   repeat_interval, timezone, next_remind_time))
             
             reminder_id = cursor.lastrowid
