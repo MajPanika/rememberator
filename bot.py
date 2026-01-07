@@ -856,6 +856,92 @@ async def cmd_tomorrow(message: types.Message):
     
     await message.answer(response_text, parse_mode="Markdown")
 
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Показать статистику пользователя"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Получаем все напоминания пользователя
+    reminders = db.get_user_reminders(user_id, active_only=False)
+    active_reminders = db.get_user_reminders(user_id, active_only=True)
+    
+    # Считаем статистику
+    total_count = len(reminders)
+    active_count = len(active_reminders)
+    completed_count = total_count - active_count
+    
+    # Считаем по типам
+    once_count = sum(1 for r in active_reminders if r['repeat_type'] == 'once')
+    daily_count = sum(1 for r in active_reminders if r['repeat_type'] == 'daily')
+    weekly_count = sum(1 for r in active_reminders if r['repeat_type'] == 'weekly')
+    
+    # Самые ранние и поздние напоминания
+    if active_reminders:
+        # Преобразуем времена
+        reminder_times = []
+        for reminder in active_reminders:
+            remind_time = reminder.get('next_remind_time_utc')
+            if isinstance(remind_time, str):
+                try:
+                    remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+                    remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
+                    reminder_times.append((reminder, remind_time))
+                except:
+                    continue
+        
+        if reminder_times:
+            # Сортируем по времени
+            reminder_times.sort(key=lambda x: x[1])
+            earliest = reminder_times[0]
+            latest = reminder_times[-1]
+            
+            # Конвертируем в локальное время
+            user_tz = pytz.timezone(timezone)
+            earliest_local = earliest[1].astimezone(user_tz)
+            latest_local = latest[1].astimezone(user_tz)
+            
+            earliest_time = earliest_local.strftime('%d.%m.%Y %H:%M')
+            latest_time = latest_local.strftime('%d.%m.%Y %H:%M')
+        else:
+            earliest_time = latest_time = "-"
+    else:
+        earliest_time = latest_time = "-"
+    
+    if language == 'ru':
+        stats_text = f"📊 *Ваша статистика*\n\n"
+        stats_text += f"📅 Всего напоминаний: {total_count}\n"
+        stats_text += f"✅ Активных: {active_count}\n"
+        stats_text += f"✓ Выполненных: {completed_count}\n\n"
+        stats_text += f"📌 По типам:\n"
+        stats_text += f"  • Разовые: {once_count}\n"
+        stats_text += f"  • Ежедневные: {daily_count}\n"
+        stats_text += f"  • Еженедельные: {weekly_count}\n\n"
+        stats_text += f"⏰ Ближайшее напоминание: {earliest_time}\n"
+        stats_text += f"⏰ Самое позднее: {latest_time}\n\n"
+        stats_text += f"🕒 Часовой пояс: {timezone}"
+    else:
+        stats_text = f"📊 *Your Statistics*\n\n"
+        stats_text += f"📅 Total reminders: {total_count}\n"
+        stats_text += f"✅ Active: {active_count}\n"
+        stats_text += f"✓ Completed: {completed_count}\n\n"
+        stats_text += f"📌 By type:\n"
+        stats_text += f"  • One-time: {once_count}\n"
+        stats_text += f"  • Daily: {daily_count}\n"
+        stats_text += f"  • Weekly: {weekly_count}\n\n"
+        stats_text += f"⏰ Earliest reminder: {earliest_time}\n"
+        stats_text += f"⏰ Latest reminder: {latest_time}\n\n"
+        stats_text += f"🕒 Timezone: {timezone}"
+    
+    await message.answer(stats_text, parse_mode="Markdown")
+
 # ===== СОЗДАНИЕ НАПОМИНАНИЙ =====
 
 async def ask_for_time(message: types.Message, language: str, state: FSMContext):
