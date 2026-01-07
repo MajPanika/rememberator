@@ -126,6 +126,10 @@ class TimeParser:
             if result > max_future:
                 logger.warning(f"Date too far in future: {result}")
                 return None, "too_far", {}
+
+        # 5. ✅ ВАЖНО: Обнуляем микросекунды и секунды для всех результатов
+        if result:
+            result = result.replace(microsecond=0, second=0)
         
         self._cache[cache_key] = (result, parse_type, extra_info)
         return result, parse_type, extra_info
@@ -472,11 +476,15 @@ class TimeParser:
             
             parsed = dateparser.parse(time_str, settings=settings)
             if parsed:
+                parsed = parsed.replace(microsecond=0, second=0)
                 return parsed, "dateparser"
             
             dates = search_dates(time_str, languages=[language], settings=settings)
             if dates:
-                return dates[0][1], "dateparser_search"
+                result = dates[0][1]
+                # ✅ Обнуляем микросекунды и секунды
+                result = result.replace(microsecond=0, second=0)
+                return result, "dateparser_search"
                 
         except Exception as e:
             logger.debug(f"Dateparser failed for '{time_str}': {e}")
@@ -517,7 +525,9 @@ class TimeParser:
         days_ahead = weekday - base_time.weekday()
         if days_ahead <= 0:
             days_ahead += 7
-        return base_time + timedelta(days=days_ahead)
+        result = base_time + timedelta(days=days_ahead)
+        # ✅ Обнуляем микросекунды и секунды
+        return result.replace(microsecond=0, second=0)
     
     def extract_reminder_text(self, full_text: str, language: str = 'ru') -> Tuple[str, str]:
         """Извлечь текст напоминания и время из полной строки"""
