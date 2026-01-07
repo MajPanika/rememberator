@@ -253,24 +253,23 @@ class Database:
             if count >= Config.MAX_REMINDERS_PER_USER:
                 raise ValueError(f"Достигнут лимит в {Config.MAX_REMINDERS_PER_USER} напоминаний")
             
+            # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ ЕЩЕ РАЗ (на всякий случай)
+            remind_time_utc = remind_time_utc.replace(microsecond=0)
+            
             # Определяем следующее время для повторяющихся напоминаний
             next_remind_time = remind_time_utc
             if repeat_type != 'once':
                 next_remind_time = self._calculate_next_remind_time(
                     remind_time_utc, repeat_type, repeat_days, repeat_interval
                 )
+                # ✅ И для следующего времени тоже обнуляем
+                if next_remind_time:
+                    next_remind_time = next_remind_time.replace(microsecond=0)
             
-            # ВАЖНО: Обрезаем миллисекунды и сохраняем как строку в формате SQLite
-            # SQLite лучше работает с простыми форматами
-            def format_for_sqlite(dt):
-                """Форматируем datetime для SQLite"""
-                if dt is None:
-                    return None
-                # Обрезаем миллисекунды и часовой пояс
-                return dt.strftime('%Y-%m-%d %H:%M:%S')
-            
-            remind_time_str = format_for_sqlite(remind_time_utc)
-            next_time_str = format_for_sqlite(next_remind_time)
+            # ✅ Сохраняем как строку БЕЗ часового пояса в формате SQLite
+            # SQLite прекрасно работает с таким форматом
+            remind_time_str = remind_time_utc.strftime('%Y-%m-%d %H:%M:%S')
+            next_time_str = next_remind_time.strftime('%Y-%m-%d %H:%M:%S') if next_remind_time else remind_time_str
             
             # Добавляем напоминание в БД
             cursor.execute('''
@@ -291,8 +290,7 @@ class Database:
             ''', (user_id,))
             
             logger.info(f"🔔 Добавлено напоминание {reminder_id} для пользователя {user_id}")
-            logger.info(f"   Сохранено время: {remind_time_str} (UTC)")
-            logger.info(f"   Следующее время: {next_time_str} (UTC)")
+            logger.info(f"   Сохранено время (UTC, без микросекунд): {remind_time_str}")
             
             return reminder_id
     
@@ -330,45 +328,14 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # ТЕКУЩЕЕ ВРЕМЯ РАЗНЫМИ СПОСОБАМИ
-            cursor.execute("SELECT datetime('now') as now_sqlite")
-            now_sqlite = cursor.fetchone()['now_sqlite']
-            
-            # Также получаем время Python для сравнения
-            import pytz
-            from datetime import datetime
-            now_python_utc = datetime.now(pytz.UTC)
-            
-            logger.info(f"🔍 Поиск напоминаний для отправки...")
-            logger.info(f"   SQLite текущее время: {now_sqlite}")
-            logger.info(f"   Python текущее время UTC: {now_python_utc}")
-            
-            # Покажем все активные напоминания для отладки
-            cursor.execute('''
-                SELECT id, next_remind_time_utc, text 
-                FROM reminders 
-                WHERE is_active = 1 AND is_paused = 0
-                ORDER BY next_remind_time_utc
-            ''')
-            all_active = cursor.fetchall()
-            
-            if all_active:
-                logger.info(f"📋 Все активные напоминания ({len(all_active)}):")
-                for reminder in all_active:
-                    logger.info(f"   • ID {reminder['id']}: {reminder['text'][:30]}... "
-                              f"время: {reminder['next_remind_time_utc']}")
-            else:
-                logger.info("📭 Нет активных напоминаний")
-            
-            # Ищем напоминания, которые нужно отправить
-            # Используем более широкий диапазон для тестирования
+            # Простой запрос - теперь времена в одном формате
             cursor.execute('''
                 SELECT r.*, u.timezone, u.language_code 
                 FROM reminders r
                 JOIN users u ON r.user_id = u.user_id
                 WHERE r.is_active = 1 
                 AND r.is_paused = 0
-                AND r.next_remind_time_utc <= datetime('now', '+1 minute')
+                AND r.next_remind_time_utc <= datetime('now')
                 ORDER BY r.next_remind_time_utc
             ''')
             
@@ -376,29 +343,12 @@ class Database:
             reminders = [dict(row) for row in results]
             
             if reminders:
-                logger.info(f"🎯 Найдено {len(reminders)} напоминаний для отправки:")
+                logger.info(f"🎯 Найдено {len(reminders)} напоминаний для отправки")
                 for reminder in reminders:
-                    logger.info(f"   ✓ ID {reminder['id']}: '{reminder['text'][:30]}...' "
+                    logger.info(f"   • ID {reminder['id']}: {reminder['text'][:30]}... "
                               f"в {reminder.get('next_remind_time_utc')}")
             else:
-                logger.info("❌ Не найдено напоминаний для отправки")
-                
-                # Для отладки: покажем что ищет SQL
-                cursor.execute('''
-                    SELECT r.id, r.next_remind_time_utc, datetime('now') as current,
-                           (julianday(r.next_remind_time_utc) - julianday('now')) * 86400 as diff_seconds
-                    FROM reminders r
-                    WHERE r.is_active = 1 AND r.is_paused = 0
-                    LIMIT 5
-                ''')
-                debug_info = cursor.fetchall()
-                if debug_info:
-                    logger.info("🔧 Отладочная информация:")
-                    for row in debug_info:
-                        diff_seconds = row['diff_seconds']
-                        status = "ПРОПУЩЕНО" if diff_seconds < 0 else f"через {int(diff_seconds)} сек"
-                        logger.info(f"   • ID {row['id']}: {row['next_remind_time_utc']} "
-                                  f"({status}), сейчас: {row['current']}")
+                logger.info("📭 Нет напоминаний для отправки")
             
             return reminders
     
@@ -687,13 +637,13 @@ class Database:
                 # Для разовых или неизвестных типов возвращаем None
                 return None
                 
-#            next_time = next_time.replace(microsecond=0)
+            next_time = next_time.replace(microsecond=0)
             return next_time
             
         except Exception as e:
             logger.error(f"Ошибка расчета следующего времени: {e}")
             # В случае ошибки возвращаем время через день
-            return current_time + timedelta(days=1)
+            return (current_time + timedelta(days=1)).replace(microsecond=0)
     
     def backup_database(self):
         """Создать резервную копию базы данных"""
