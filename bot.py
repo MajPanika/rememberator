@@ -60,8 +60,13 @@ class SettingsState(StatesGroup):
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 
 def format_local_time(dt: datetime, timezone: str, language: str) -> str:
-    """Форматировать время для пользователя"""
+    """Форматировать время для пользователя в его часовом поясе"""
     try:
+        # Если время naive (без часового пояса), считаем что это UTC
+        if dt.tzinfo is None:
+            dt = pytz.UTC.localize(dt)
+        
+        # Конвертируем в часовой пояс пользователя
         user_tz = pytz.timezone(timezone)
         local_dt = dt.astimezone(user_tz)
         
@@ -76,26 +81,41 @@ def format_local_time(dt: datetime, timezone: str, language: str) -> str:
         else:
             # Английский формат: January 15, 2024, 2:30 PM
             return local_dt.strftime("%B %d, %Y, %I:%M %p")
-    except:
+    except Exception as e:
+        logger.error(f"Error formatting time: {e}")
         # Фолбэк
         return dt.strftime("%Y-%m-%d %H:%M")
-
+        
 async def send_reminder_notification(reminder: dict):
     """Отправить уведомление о напоминании"""
     try:
         user_timezone = reminder['timezone']
         user_lang = reminder.get('language_code', 'ru')
         
-        # Форматируем время для пользователя
+        # Логируем информацию о напоминании
+        logger.info(f"Отправка напоминания {reminder['id']} пользователю {reminder['user_id']}")
+        logger.info(f"  Текст: {reminder['text']}")
+        logger.info(f"  Часовой пояс пользователя: {user_timezone}")
+        
         # Проблема: remind_time_utc может быть строкой или datetime
         remind_time = reminder['remind_time_utc']
         if isinstance(remind_time, str):
-            remind_time = datetime.fromisoformat(remind_time)
-        # Если это уже datetime, оставляем как есть
+            remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+            # Делаем aware (с часовым поясом UTC)
+            remind_time = pytz.UTC.localize(remind_time)
         
-        formatted_time = format_local_time(
-            remind_time, user_timezone, user_lang
-        )
+        # Если это naive datetime, добавляем UTC
+        if remind_time.tzinfo is None:
+            remind_time = pytz.UTC.localize(remind_time)
+        
+        # Конвертируем в местное время пользователя для отображения
+        user_tz = pytz.timezone(user_timezone)
+        local_time = remind_time.astimezone(user_tz)
+        
+        logger.info(f"  Время UTC в БД: {remind_time}")
+        logger.info(f"  Местное время пользователя: {local_time}")
+        
+        formatted_time = format_local_time(remind_time, user_timezone, user_lang)
         
         # Текст уведомления
         notification_text = {
@@ -115,13 +135,13 @@ async def send_reminder_notification(reminder: dict):
             parse_mode="Markdown"
         )
         
+        logger.info(f"✅ Напоминание {reminder['id']} отправлено пользователю {reminder['user_id']}")
+        
         # Помечаем как отправленное
         db.mark_reminder_sent(reminder['id'])
         
-        logger.info(f"Sent reminder {reminder['id']} to user {reminder['user_id']}")
-        
     except Exception as e:
-        logger.error(f"Failed to send reminder {reminder['id']}: {e}")
+        logger.error(f"❌ Ошибка отправки напоминания {reminder['id']}: {e}", exc_info=True)
         # Увеличиваем счетчик ошибок
         with db.get_connection() as conn:
             cursor = conn.cursor()
@@ -161,6 +181,46 @@ async def check_and_send_reminders():
         logger.error(f"Error in check_and_send_reminders: {e}")
 
 # ===== ОСНОВНЫЕ КОМАНДЫ =====
+
+@dp.message(Command("test_time"))
+async def cmd_test_time(message: types.Message):
+    """Тестовая команда для проверки времени"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Текущее время в разных часовых поясах
+    now_utc = datetime.now(pytz.UTC)
+    user_tz = pytz.timezone(timezone)
+    now_local = now_utc.astimezone(user_tz)
+    
+    test_text = {
+        'ru': f"⏰ *Тест времени*\n\n"
+              f"🕐 Текущее время UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+              f"🏠 Ваше местное время ({timezone}): {now_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+              f"*Примеры:*\n"
+              f"• 'через 5 минут' - напоминание через 5 минут\n"
+              f"• '18:30' - сегодня в 18:30\n"
+              f"• 'завтра 10:00' - завтра в 10:00",
+        'en': f"⏰ *Time Test*\n\n"
+              f"🕐 Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+              f"🏠 Your local time ({timezone}): {now_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+              f"*Examples:*\n"
+              f"• 'in 5 minutes' - reminder in 5 minutes\n"
+              f"• '18:30' - today at 18:30\n"
+              f"• 'tomorrow 10:00' - tomorrow at 10:00"
+    }
+    
+    await message.answer(
+        test_text.get(language, test_text['en']),
+        parse_mode="Markdown"
+    )
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -938,9 +998,31 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
                          callback: types.CallbackQuery, language: str):
     """Создать напоминание в БД"""
     try:
-        # Конвертируем в UTC для хранения
+        # ВАЖНО: parsed_time уже в правильном часовом поясе пользователя
+        # Нужно конвертировать в UTC для хранения
+        
+        # Создаем часовой пояс пользователя
         user_tz = pytz.timezone(timezone)
+        
+        # Делаем время aware (с часовым поясом)
+        if parsed_time.tzinfo is None:
+            # Если время naive, добавляем часовой пояс пользователя
+            parsed_time = user_tz.localize(parsed_time)
+        
+        # Конвертируем в UTC
         utc_time = parsed_time.astimezone(pytz.UTC)
+        
+        # Отладочная информация
+        logger.info(f"Создание напоминания: пользователь {user_id}")
+        logger.info(f"  Местное время: {parsed_time} ({timezone})")
+        logger.info(f"  UTC время: {utc_time}")
+        
+        # Для тестирования: если время в прошлом, добавляем 1 минуту
+        now_utc = datetime.now(pytz.UTC)
+        if utc_time < now_utc and repeat_type == 'once':
+            # Для разовых напоминаний в прошлом - добавляем минуту для теста
+            utc_time = now_utc + timedelta(minutes=1)
+            logger.info(f"  Время в прошлом, смещаем на: {utc_time}")
         
         # Добавляем напоминание в БД
         reminder_id = db.add_reminder(
@@ -952,7 +1034,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             timezone=timezone
         )
         
-        # Форматируем для вывода
+        # Форматируем для вывода (в местном времени пользователя)
         formatted_time = format_local_time(parsed_time, timezone, language)
         
         # Текст подтверждения
@@ -1019,8 +1101,8 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             error_text.get(language, error_text['ru'])
         )
         
-        logger.error(f"Failed to create reminder for user {user_id}: {e}")
-
+        logger.error(f"Failed to create reminder for user {user_id}: {e}", exc_info=True)
+        
 # ===== ПРОСМОТР НАПОМИНАНИЙ =====
 
 @dp.message(Command("list"))
