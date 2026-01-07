@@ -315,19 +315,45 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Отладочная информация: текущее время в БД
-            cursor.execute("SELECT datetime('now') as now_utc")
-            now_utc = cursor.fetchone()['now_utc']
-            logger.debug(f"⏰ Текущее время UTC в БД: {now_utc}")
+            # ТЕКУЩЕЕ ВРЕМЯ РАЗНЫМИ СПОСОБАМИ
+            cursor.execute("SELECT datetime('now') as now_sqlite")
+            now_sqlite = cursor.fetchone()['now_sqlite']
+            
+            # Также получаем время Python для сравнения
+            import pytz
+            from datetime import datetime
+            now_python_utc = datetime.now(pytz.UTC)
+            
+            logger.info(f"🔍 Поиск напоминаний для отправки...")
+            logger.info(f"   SQLite текущее время: {now_sqlite}")
+            logger.info(f"   Python текущее время UTC: {now_python_utc}")
+            
+            # Покажем все активные напоминания для отладки
+            cursor.execute('''
+                SELECT id, next_remind_time_utc, text 
+                FROM reminders 
+                WHERE is_active = 1 AND is_paused = 0
+                ORDER BY next_remind_time_utc
+            ''')
+            all_active = cursor.fetchall()
+            
+            if all_active:
+                logger.info(f"📋 Все активные напоминания ({len(all_active)}):")
+                for reminder in all_active:
+                    logger.info(f"   • ID {reminder['id']}: {reminder['text'][:30]}... "
+                              f"время: {reminder['next_remind_time_utc']}")
+            else:
+                logger.info("📭 Нет активных напоминаний")
             
             # Ищем напоминания, которые нужно отправить
+            # Используем более широкий диапазон для тестирования
             cursor.execute('''
                 SELECT r.*, u.timezone, u.language_code 
                 FROM reminders r
                 JOIN users u ON r.user_id = u.user_id
                 WHERE r.is_active = 1 
                 AND r.is_paused = 0
-                AND r.next_remind_time_utc <= datetime('now')
+                AND r.next_remind_time_utc <= datetime('now', '+1 minute')
                 ORDER BY r.next_remind_time_utc
             ''')
             
@@ -335,10 +361,29 @@ class Database:
             reminders = [dict(row) for row in results]
             
             if reminders:
-                logger.info(f"🔔 Найдено {len(reminders)} напоминаний для отправки")
+                logger.info(f"🎯 Найдено {len(reminders)} напоминаний для отправки:")
                 for reminder in reminders:
-                    logger.info(f"  • ID {reminder['id']}: {reminder['text'][:30]}... "
-                               f"(следующее время: {reminder.get('next_remind_time_utc')})")
+                    logger.info(f"   ✓ ID {reminder['id']}: '{reminder['text'][:30]}...' "
+                              f"в {reminder.get('next_remind_time_utc')}")
+            else:
+                logger.info("❌ Не найдено напоминаний для отправки")
+                
+                # Для отладки: покажем что ищет SQL
+                cursor.execute('''
+                    SELECT r.id, r.next_remind_time_utc, datetime('now') as current,
+                           (julianday(r.next_remind_time_utc) - julianday('now')) * 86400 as diff_seconds
+                    FROM reminders r
+                    WHERE r.is_active = 1 AND r.is_paused = 0
+                    LIMIT 5
+                ''')
+                debug_info = cursor.fetchall()
+                if debug_info:
+                    logger.info("🔧 Отладочная информация:")
+                    for row in debug_info:
+                        diff_seconds = row['diff_seconds']
+                        status = "ПРОПУЩЕНО" if diff_seconds < 0 else f"через {int(diff_seconds)} сек"
+                        logger.info(f"   • ID {row['id']}: {row['next_remind_time_utc']} "
+                                  f"({status}), сейчас: {row['current']}")
             
             return reminders
     
