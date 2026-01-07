@@ -548,6 +548,119 @@ async def cmd_help(message: types.Message):
         parse_mode="Markdown"
     )
 
+# ===== УДАЛЕНИЕ НАПОМИНАНИЙ =====
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: types.Message):
+    """Удалить напоминание по ID"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем аргумент (ID напоминания)
+    args = message.text.split()
+    if len(args) < 2:
+        error_text = {
+            'ru': "❌ *Использование:* /delete <ID_напоминания>\n\n"
+                  "Пример:\n`/delete 5`\n\n"
+                  "Используйте /list чтобы увидеть ID ваших напоминаний.",
+            'en': "❌ *Usage:* /delete <reminder_id>\n\n"
+                  "Example:\n`/delete 5`\n\n"
+                  "Use /list to see your reminder IDs."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        reminder_id = int(args[1])
+    except ValueError:
+        error_text = {
+            'ru': "❌ ID должен быть числом!",
+            'en': "❌ ID must be a number!"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Пробуем удалить
+    success = db.delete_reminder(reminder_id, user_id)
+    
+    if success:
+        success_text = {
+            'ru': f"✅ Напоминание *{reminder_id}* удалено!",
+            'en': f"✅ Reminder *{reminder_id}* deleted!"
+        }
+        await message.answer(
+            success_text.get(language, success_text['ru']),
+            parse_mode="Markdown"
+        )
+    else:
+        error_text = {
+            'ru': f"❌ Не удалось удалить напоминание *{reminder_id}*.\n"
+                  "Проверьте ID или убедитесь, что напоминание принадлежит вам.",
+            'en': f"❌ Failed to delete reminder *{reminder_id}*.\n"
+                  "Check the ID or make sure the reminder belongs to you."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+
+# Добавим также команду для удаления всех выполненных
+@dp.message(Command("clear"))
+async def cmd_clear(message: types.Message):
+    """Удалить все выполненные напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем все напоминания пользователя
+    all_reminders = db.get_user_reminders(user_id, active_only=False)
+    
+    if not all_reminders:
+        empty_text = {
+            'ru': "📭 У вас нет напоминаний.",
+            'en': "📭 You have no reminders."
+        }
+        await message.answer(empty_text.get(language, empty_text['ru']))
+        return
+    
+    # Считаем неактивные (выполненные)
+    inactive_reminders = [r for r in all_reminders if not r['is_active']]
+    
+    if not inactive_reminders:
+        no_inactive_text = {
+            'ru': "✅ У вас нет выполненных напоминаний для удаления.",
+            'en': "✅ You have no completed reminders to delete."
+        }
+        await message.answer(no_inactive_text.get(language, no_inactive_text['ru']))
+        return
+    
+    # Удаляем каждое неактивное напоминание
+    deleted_count = 0
+    for reminder in inactive_reminders:
+        if db.delete_reminder(reminder['id'], user_id):
+            deleted_count += 1
+    
+    result_text = {
+        'ru': f"🧹 Удалено {deleted_count} выполненных напоминаний!",
+        'en': f"🧹 Deleted {deleted_count} completed reminders!"
+    }
+    
+    await message.answer(result_text.get(language, result_text['ru']))
+
 # ===== СОЗДАНИЕ НАПОМИНАНИЙ =====
 
 async def ask_for_time(message: types.Message, language: str, state: FSMContext):
