@@ -247,7 +247,7 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Проверяем лимит напоминаний
+            # Проверяем лимит
             count = self.get_user_reminder_count(user_id)
             from config import Config
             if count >= Config.MAX_REMINDERS_PER_USER:
@@ -260,14 +260,26 @@ class Database:
                     remind_time_utc, repeat_type, repeat_days, repeat_interval
                 )
             
+            # ВАЖНО: Обрезаем миллисекунды и сохраняем как строку в формате SQLite
+            # SQLite лучше работает с простыми форматами
+            def format_for_sqlite(dt):
+                """Форматируем datetime для SQLite"""
+                if dt is None:
+                    return None
+                # Обрезаем миллисекунды и часовой пояс
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            remind_time_str = format_for_sqlite(remind_time_utc)
+            next_time_str = format_for_sqlite(next_remind_time)
+            
             # Добавляем напоминание в БД
             cursor.execute('''
                 INSERT INTO reminders 
                 (user_id, text, remind_time_utc, repeat_type, repeat_days, 
                  repeat_interval, timezone, next_remind_time_utc)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, text, remind_time_utc, repeat_type, repeat_days, 
-                  repeat_interval, timezone, next_remind_time))
+            ''', (user_id, text, remind_time_str, repeat_type, repeat_days, 
+                  repeat_interval, timezone, next_time_str))
             
             reminder_id = cursor.lastrowid
             
@@ -279,6 +291,9 @@ class Database:
             ''', (user_id,))
             
             logger.info(f"🔔 Добавлено напоминание {reminder_id} для пользователя {user_id}")
+            logger.info(f"   Сохранено время: {remind_time_str} (UTC)")
+            logger.info(f"   Следующее время: {next_time_str} (UTC)")
+            
             return reminder_id
     
     def get_user_reminders(self, user_id: int, active_only: bool = True) -> List[Dict]:
@@ -671,7 +686,8 @@ class Database:
             else:
                 # Для разовых или неизвестных типов возвращаем None
                 return None
-            
+                
+#            next_time = next_time.replace(microsecond=0)
             return next_time
             
         except Exception as e:
