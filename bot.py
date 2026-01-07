@@ -154,33 +154,62 @@ async def send_reminder_notification(reminder: dict):
 async def check_and_send_reminders():
     """Проверить и отправить напоминания, которые подошли по времени"""
     try:
+        logger.info("=" * 50)
+        logger.info("🔄 ЗАПУСК ПРОВЕРКИ НАПОМИНАНИЙ")
+        
         due_reminders = db.get_due_reminders()
         
+        logger.info(f"📊 Найдено напоминаний для отправки: {len(due_reminders)}")
+        
         if not due_reminders:
+            logger.info("✅ Нет напоминаний для отправки")
             return
         
-        logger.info(f"Found {len(due_reminders)} due reminders")
+        sent_count = 0
+        error_count = 0
         
         for reminder in due_reminders:
             try:
+                logger.info(f"📤 Отправляю напоминание {reminder['id']}...")
                 await send_reminder_notification(reminder)
-                await asyncio.sleep(0.1)
+                sent_count += 1
+                await asyncio.sleep(0.1)  # Небольшая пауза между отправками
                 
             except Exception as e:
-                logger.error(f"Failed to send reminder {reminder['id']}: {e}")
-                # Увеличиваем счетчик ошибок
-                with db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE reminders 
-                        SET error_count = error_count + 1 
-                        WHERE id = ?
-                    ''', (reminder['id'],))
+                logger.error(f"❌ Ошибка отправки напоминания {reminder['id']}: {e}", exc_info=True)
+                error_count += 1
+        
+        logger.info(f"📈 ИТОГ: отправлено {sent_count}, ошибок {error_count}")
+        logger.info("=" * 50)
             
     except Exception as e:
-        logger.error(f"Error in check_and_send_reminders: {e}")
+        logger.error(f"💥 КРИТИЧЕСКАЯ ОШИБКА в check_and_send_reminders: {e}", exc_info=True)
 
 # ===== ОСНОВНЫЕ КОМАНДЫ =====
+
+@dp.message(Command("check_now"))
+async def cmd_check_now(message: types.Message):
+    """Немедленно проверить и отправить напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    await message.answer("🔍 Проверяю напоминания...")
+    
+    # Немедленно запускаем проверку
+    await check_and_send_reminders()
+    
+    response = {
+        'ru': "✅ Проверка завершена. Смотрите логи бота.",
+        'en': "✅ Check completed. See bot logs."
+    }
+    
+    await message.answer(response.get(language, response['en']))
 
 @dp.message(Command("test_time"))
 async def cmd_test_time(message: types.Message):
