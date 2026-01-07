@@ -187,6 +187,116 @@ async def check_and_send_reminders():
 
 # ===== ОСНОВНЫЕ КОМАНДЫ =====
 
+@dp.message(Command("fix_reminders"))
+async def cmd_fix_reminders(message: types.Message):
+    """Исправить времена напоминаний в БД"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    await message.answer("🔧 Исправляю времена напоминаний...")
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Получаем все напоминания пользователя
+        cursor.execute('SELECT id, next_remind_time_utc FROM reminders WHERE user_id = ?', (user_id,))
+        reminders = cursor.fetchall()
+        
+        fixed_count = 0
+        for reminder in reminders:
+            old_time = reminder['next_remind_time_utc']
+            if old_time and '+' in old_time:  # Если есть часовой пояс
+                # Обрезаем часовой пояс и миллисекунды
+                try:
+                    # Парсим время
+                    dt = datetime.fromisoformat(old_time.replace('Z', '+00:00'))
+                    # Обрезаем миллисекунды
+                    dt = dt.replace(microsecond=0)
+                    # Сохраняем без часового пояса
+                    new_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Обновляем в БД
+                    cursor.execute('''
+                        UPDATE reminders 
+                        SET next_remind_time_utc = ?
+                        WHERE id = ?
+                    ''', (new_time, reminder['id']))
+                    
+                    fixed_count += 1
+                    logger.info(f"Исправлено время напоминания {reminder['id']}: {old_time} -> {new_time}")
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка исправления времени {reminder['id']}: {e}")
+        
+        conn.commit()
+    
+    response = {
+        'ru': f"✅ Исправлено {fixed_count} напоминаний.",
+        'en': f"✅ Fixed {fixed_count} reminders."
+    }
+    
+    await message.answer(response.get(language, response['ru']))
+
+@dp.message(Command("force_send"))
+async def cmd_force_send(message: types.Message):
+    """Принудительно отправить все просроченные напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем все активные напоминания пользователя
+    reminders = db.get_user_reminders(user_id, active_only=True)
+    
+    if not reminders:
+        response = {
+            'ru': "📭 У вас нет активных напоминаний.",
+            'en': "📭 You have no active reminders."
+        }
+        await message.answer(response.get(language, response['ru']))
+        return
+    
+    await message.answer("🔄 Ищу просроченные напоминания...")
+    
+    sent_count = 0
+    now_utc = datetime.now(pytz.UTC)
+    
+    for reminder in reminders:
+        # Проверяем, просрочено ли напоминание
+        remind_time = reminder['next_remind_time_utc']
+        if isinstance(remind_time, str):
+            try:
+                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+                remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
+            except:
+                continue
+        
+        # Если напоминание просрочено
+        if remind_time <= now_utc:
+            try:
+                await send_reminder_notification(reminder)
+                sent_count += 1
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Ошибка отправки напоминания {reminder['id']}: {e}")
+    
+    response = {
+        'ru': f"✅ Отправлено {sent_count} просроченных напоминаний.",
+        'en': f"✅ Sent {sent_count} overdue reminders."
+    }
+    
+    await message.answer(response.get(language, response['ru']))
+
 @dp.message(Command("check_now"))
 async def cmd_check_now(message: types.Message):
     """Немедленно проверить и отправить напоминания"""
@@ -1038,6 +1148,10 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             # Если время naive, добавляем часовой пояс пользователя
             parsed_time = user_tz.localize(parsed_time)
         
+        # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ И СЕКУНДЫ
+        # Приводим к целым минутам (или можно оставить секунды, но без микросекунд)
+        parsed_time = parsed_time.replace(second=0, microsecond=0)
+        
         # Конвертируем в UTC
         utc_time = parsed_time.astimezone(pytz.UTC)
         
@@ -1047,7 +1161,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         logger.info(f"  UTC время: {utc_time}")
         
         # Для тестирования: если время в прошлом, добавляем 1 минуту
-        now_utc = datetime.now(pytz.UTC)
+        now_utc = datetime.now(pytz.UTC).replace(second=0, microsecond=0)
         if utc_time < now_utc and repeat_type == 'once':
             # Для разовых напоминаний в прошлом - добавляем минуту для теста
             utc_time = now_utc + timedelta(minutes=1)
@@ -1063,6 +1177,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             timezone=timezone
         )
         
+                
         # Форматируем для вывода (в местном времени пользователя)
         formatted_time = format_local_time(parsed_time, timezone, language)
         
