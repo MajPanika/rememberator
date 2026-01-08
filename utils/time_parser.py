@@ -87,6 +87,36 @@ class TimeParser:
             'monday': 0, 'tuesday': 1, 'wednesday': 2,
             'thursday': 3, 'friday': 4, 'saturday': 5, 'sunday': 6
         }
+
+    def _try_dateparser(self, time_str: str, language: str, 
+                       timezone: str, base_time: datetime) -> Tuple[Optional[datetime], str]:
+        """Попытка парсинга с помощью dateparser"""
+        try:
+            settings = {
+                'TIMEZONE': timezone,
+                'RETURN_AS_TIMEZONE_AWARE': True,
+                'LANGUAGES': [language],
+                'RELATIVE_BASE': base_time,
+                'PREFER_DATES_FROM': 'future'
+            }
+            
+            parsed = dateparser.parse(time_str, settings=settings)
+            if parsed:
+                # Обнуляем микросекунды и секунды
+                parsed = parsed.replace(microsecond=0, second=0)
+                return parsed, "dateparser"
+            
+            dates = search_dates(time_str, languages=[language], settings=settings)
+            if dates:
+                result = dates[0][1]
+                # Обнуляем микросекунды и секунды
+                result = result.replace(microsecond=0, second=0)
+                return result, "dateparser_search"
+                    
+        except Exception as e:
+            logger.debug(f"Dateparser failed for '{time_str}': {e}")
+        
+        return None, "dateparser_failed"
     
     def parse(self, time_str: str, language: str = 'ru', 
               timezone: str = 'Europe/Moscow',
