@@ -1296,7 +1296,7 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
     
     # Сначала пробуем распарсить как "11 января 16-00 театр в 18-00"
     # Извлекаем время из строки
-    extracted_time, extracted_text = time_parser.extract_time_and_text(original_time_text, language)
+    extracted_time, extracted_text = time_parser.extract_best_time_and_text(original_time_text, language)
     
     if extracted_time and not extracted_text:
         # В строке только время (без дополнительного текста)
@@ -1590,7 +1590,7 @@ async def handle_all_messages(message: types.Message, state: FSMContext):
     timezone = user.get('timezone', 'Europe/Moscow')
     
     # Пробуем распознать время в сообщении
-    time_part, text_part = time_parser.extract_time_and_text(text, language)
+    time_part, text_part = time_parser.extract_best_time_and_text(text, language)
     
     if not time_part:
         # Не нашли время - возможно пользователь просто написал текст
