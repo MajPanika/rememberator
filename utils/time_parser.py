@@ -681,39 +681,56 @@ class TimeParser:
         
         # Для русского языка
         if language == 'ru':
-            # Порядок важен: от самых специфичных к общим
+            # Порядок ВАЖЕН: от самых специфичных к общим
             patterns = [
-                # Даты со словами и временем: "11 января 16-00"
-                r'(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+\d{1,2}[-\.:]\d{2})',
-                r'(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+\d{1,2})',
+                # Даты со словами и временем с тире/точкой: "11 января 16-00", "11 января 16.00"
+                r'(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4})?\s+\d{1,2}[-\.:]\d{2})',
+                r'(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4})?\s+\d{1,2})',
                 
-                # Даты числовые и время: "11.01 16-00"
+                # Даты со словами в начале и время в конце: "11 января 16-00"
+                r'(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4})?)\s+(\d{1,2}[-\.:]\d{2})',
+                
+                # Числовые даты и время: "11.01 16-00"
                 r'(\d{1,2}[\.\/]\d{1,2}(?:[\.\/]\d{2,4})?\s+\d{1,2}[-\.:]\d{2})',
                 
-                # Относительное время: "через 2 часа"
-                r'(через\s+\d+\s+(?:час|часа|часов|минут|минуты|минуту|день|дня|дней))',
+                # Относительное время: "через 2 часа", "через 2 часа 30 минут"
+                r'(через\s+\d+\s+(?:час|часа|часов)(?:\s+\d+\s+(?:минут|минуты|минуту))?)',
+                r'(через\s+\d+\s+(?:минут|минуты|минуту))',
+                r'(через\s+\d+\s+(?:день|дня|дней))',
                 
                 # Дни недели: "понедельник 16-00"
                 r'((?:понедельник|вторник|сред[ау]|четверг|пятниц[ау]|суббот[ау]|воскресенье)\s+\d{1,2}[-\.:]\d{2})',
+                r'((?:понедельник|вторник|сред[ау]|четверг|пятниц[ау]|суббот[ау]|воскресенье)\s+\d{1,2})',
                 
                 # Завтра/сегодня/послезавтра: "завтра 16-00"
                 r'((?:завтра|послезавтра|сегодня)\s+\d{1,2}[-\.:]\d{2})',
                 r'((?:завтра|послезавтра|сегодня)\s+\d{1,2})',
                 
-                # Просто время: "16-00", "16:00", "16.00", "4 вечера"
+                # Время с предлогом: "в 16-00", "в 8 вечера"
+                r'(в\s+\d{1,2}[-\.:]\d{2}\s*(?:утра|вечера|ночи|дня)?)',
+                r'(в\s+\d{1,2}\s+(?:утра|вечера|ночи|дня))',
+                
+                # Просто время: "16-00", "16:00", "16.00"
                 r'(\d{1,2}[-\.:]\d{2}\s*(?:утра|вечера|ночи|дня)?)',
+                
+                # Время без минут: "8 утра", "4 вечера"
                 r'(\d{1,2}\s+(?:утра|вечера|ночи|дня))',
-                r'(\d{1,2}[-\.:]\d{2})',
+                
+                # Просто число (последний вариант)
                 r'(\d{1,2})',
             ]
         else:
             # Для английского
             patterns = [
-                r'((?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
+                r'((?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?\s+\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
+                r'((?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?)\s+(\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
                 r'(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?\s+\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
-                r'(in\s+\d+\s+(?:hour|hours|minute|minutes|day|days))',
+                r'(in\s+\d+\s+(?:hour|hours)(?:\s+and\s+\d+\s+(?:minute|minutes))?)',
+                r'(in\s+\d+\s+(?:minute|minutes))',
+                r'(in\s+\d+\s+(?:day|days))',
                 r'((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
                 r'((?:tomorrow|day after tomorrow|today)\s+\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
+                r'(at\s+\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
                 r'(\d{1,2}[-\.:]\d{2}\s*(?:AM|PM|am|pm)?)',
                 r'(\d{1,2}\s*(?:AM|PM|am|pm))',
             ]
@@ -723,12 +740,29 @@ class TimeParser:
         for pattern in patterns:
             matches = list(re.finditer(pattern, full_text, re.IGNORECASE))
             for match in matches:
-                time_candidate = match.group(1).strip()
-                start_pos = match.start(1)
-                end_pos = match.end(1)
+                # Проверяем сколько групп в матче
+                if match.lastindex:
+                    # Берем последнюю непустую группу
+                    for i in range(match.lastindex, 0, -1):
+                        if match.group(i):
+                            time_candidate = match.group(i).strip()
+                            break
+                    else:
+                        continue
+                else:
+                    time_candidate = match.group(0).strip()
                 
-                # Проверяем, что это действительно время (содержит цифры)
-                if any(c.isdigit() for c in time_candidate):
+                # Проверяем, что это действительно похоже на время (содержит цифры)
+                if any(c.isdigit() for c in time_candidate) and len(time_candidate) >= 2:
+                    # Ищем позицию в исходной строке
+                    start_pos = full_text.find(time_candidate)
+                    if start_pos == -1:
+                        # Если не нашли точное совпадение, используем позицию матча
+                        start_pos = match.start()
+                        end_pos = match.end()
+                    else:
+                        end_pos = start_pos + len(time_candidate)
+                    
                     all_matches.append({
                         'time': time_candidate,
                         'start': start_pos,
@@ -752,20 +786,67 @@ class TimeParser:
         # Объединяем текст
         text_parts = []
         if before_text:
-            # Убираем предлоги в начале
-            before_text = re.sub(r'^(?:в|на|at|on)\s+', '', before_text, flags=re.IGNORECASE)
             text_parts.append(before_text)
-        
         if after_text:
             text_parts.append(after_text)
         
         text_part = " ".join(text_parts).strip()
         
-        # Очищаем время от лишних предлогов в начале
+        # Очищаем текст от лишних предлогов которые могли остаться
         if language == 'ru':
-            time_part = re.sub(r'^(?:в|на)\s+', '', time_part, flags=re.IGNORECASE)
+            # Убираем предлоги из текста если они стоят отдельно
+            text_part = re.sub(r'^(?:в|на|с|у|о|об|про)\s+', '', text_part)
+            # Очищаем время от предлогов
+            time_part = re.sub(r'^(?:в|на)\s+', '', time_part)
         else:
+            text_part = re.sub(r'^(?:at|on|in|for)\s+', '', text_part, flags=re.IGNORECASE)
             time_part = re.sub(r'^(?:at|on)\s+', '', time_part, flags=re.IGNORECASE)
+        
+        return time_part, text_part
+
+    def extract_best_time_and_text(self, full_text: str, language: str = 'ru') -> Tuple[str, str]:
+        """
+        Улучшенное извлечение времени и текста.
+        Пытается найти наиболее осмысленную комбинацию.
+        """
+        if not full_text:
+            return "", ""
+        
+        # Сначала пробуем стандартный метод
+        time_part, text_part = self.extract_time_and_text(full_text, language)
+        
+        # Если нашли время, но текст содержит то что похоже на дату, пробуем улучшить
+        if time_part and text_part:
+            # Проверяем, нет ли в тексте даты
+            date_patterns_ru = [
+                r'\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)',
+                r'\d{1,2}[\.\/]\d{1,2}(?:[\.\/]\d{2,4})?',
+            ]
+            
+            date_patterns_en = [
+                r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}',
+                r'\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?',
+            ]
+            
+            patterns = date_patterns_ru if language == 'ru' else date_patterns_en
+            
+            for pattern in patterns:
+                match = re.search(pattern, text_part, re.IGNORECASE)
+                if match:
+                    # Нашли дату в тексте - пробуем создать новую комбинацию
+                    date_in_text = match.group(0)
+                    # Пробуем найти время в исходном тексте
+                    time_match = re.search(r'\d{1,2}[-\.:]\d{2}', full_text)
+                    if time_match:
+                        time_in_text = time_match.group(0)
+                        # Собираем новое время: дата + время
+                        new_time_part = f"{date_in_text} {time_in_text}"
+                        # Убираем и дату и время из текста
+                        new_text_part = re.sub(pattern, '', text_part, flags=re.IGNORECASE)
+                        new_text_part = re.sub(r'\d{1,2}[-\.:]\d{2}', '', new_text_part)
+                        new_text_part = re.sub(r'\s+', ' ', new_text_part).strip()
+                        
+                        return new_time_part, new_text_part
         
         return time_part, text_part
     
