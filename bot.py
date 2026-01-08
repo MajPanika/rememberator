@@ -403,6 +403,20 @@ async def handle_smart_reminder(message: types.Message, state: FSMContext):
     Обработка сообщений без команд.
     Пытается распознать напоминание в свободной форме.
     """
+    # Исключаем кнопки главного меню
+    menu_buttons = [
+        "➕ Добавить напоминание", "➕ Add reminder",
+        "📋 Мои напоминания", "📋 My reminders",
+        "📅 На сегодня", "📅 For today",
+        "📆 На завтра", "📆 For tomorrow",
+        "⚙️ Настройки", "⚙️ Settings",
+        "❓ Помощь", "❓ Help",
+        "❌ Отмена", "❌ Cancel"
+    ]
+    
+    if message.text in menu_buttons:
+        return  # Пропускаем кнопки - их обработают другие хендлеры
+    
     user_id = message.from_user.id
     user = db.get_user(user_id)
     
@@ -645,6 +659,32 @@ async def cmd_quick(message: types.Message, state: FSMContext):
         text=text_part
     )
 
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Отмена текущей операции"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru') if user else 'ru'
+    
+    current_state = await state.get_state()
+    
+    if current_state:
+        await state.clear()
+        cancel_text = {
+            'ru': "❌ Операция отменена.",
+            'en': "❌ Operation cancelled."
+        }
+        await message.answer(
+            cancel_text.get(language, cancel_text['ru']),
+            reply_markup=get_main_keyboard(language)
+        )
+    else:
+        no_op_text = {
+            'ru': "ℹ️ Нет активных операций для отмены.",
+            'en': "ℹ️ No active operations to cancel."
+        }
+        await message.answer(no_op_text.get(language, no_op_text['ru']))
+
 @dp.message(ReminderState.waiting_for_time)
 async def process_reminder_time(message: types.Message, state: FSMContext):
     """Обработка времени напоминания"""
@@ -653,31 +693,57 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
     language = user.get('language_code', 'ru')
     timezone = user.get('timezone', 'Europe/Moscow')
     
-    # Проверяем отмену
-    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel"]
+    # Проверяем отмену (более широкий список)
+    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel", "отменить", "cancelar"]
     if message.text.lower() in [ct.lower() for ct in cancel_texts]:
         await handle_cancel(message, state, language)
         return
     
-    original_time_text = message.text.strip()  # Сохраняем оригинальный текст времени
+    original_time_text = message.text.strip()
+    
+    # Сначала пробуем распарсить как "11 января 16-00 театр в 18-00"
+    # Извлекаем время из строки
+    extracted_time, extracted_text = time_parser.extract_time_and_text(original_time_text, language)
+    
+    if extracted_time and not extracted_text:
+        # В строке только время (без дополнительного текста)
+        time_to_parse = extracted_time
+    elif extracted_time and extracted_text:
+        # В строке и время, и текст - сохраняем текст для предзаполнения
+        time_to_parse = extracted_time
+        await state.update_data(prefill_text=extracted_text)
+    else:
+        # Не нашли время в привычном формате, пробуем парсить всю строку
+        time_to_parse = original_time_text
     
     # Парсим время
     parsed_time, parse_type, extra_info = time_parser.parse(
-        original_time_text, language, timezone
+        time_to_parse, language, timezone
     )
     
     if not parsed_time:
         # Не удалось распознать время
         error_text = {
-            'ru': "❌ Не удалось распознать время.\n\n"
-                  "Попробуйте еще раз или введите /help для примеров.",
-            'en': "❌ Could not recognize time.\n\n"
-                  "Try again or enter /help for examples."
+            'ru': f"❌ Не удалось распознать время: '{original_time_text}'\n\n"
+                  "Попробуйте другие форматы:\n"
+                  "• Завтра 15:30\n"
+                  "• 20:00\n"
+                  "• Через 2 часа\n"
+                  "• 11.01.2024 16:00\n\n"
+                  "Или введите /cancel для отмены",
+            'en': f"❌ Could not recognize time: '{original_time_text}'\n\n"
+                  "Try other formats:\n"
+                  "• Tomorrow 3:30 PM\n"
+                  "• 8:00 PM\n"
+                  "• In 2 hours\n"
+                  "• 01/11/2024 4:00 PM\n\n"
+                  "Or enter /cancel to cancel"
         }
         
         await message.answer(
             error_text.get(language, error_text['ru']),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
         )
         return
     
@@ -685,52 +751,53 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
     is_valid, error_msg = time_parser.validate_time(parsed_time)
     if not is_valid:
         error_text = {
-            'ru': f"❌ {error_msg}",
-            'en': f"❌ {error_msg}"
+            'ru': f"❌ {error_msg}\n\nВведите другое время или /cancel",
+            'en': f"❌ {error_msg}\n\nEnter another time or /cancel"
         }
-        await message.answer(error_text.get(language, error_text['ru']))
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            reply_markup=get_cancel_keyboard(language)
+        )
         return
     
-    # Сохраняем время в состоянии (и оригинальный текст)
+    # Сохраняем время в состоянии
     await state.update_data(
         parsed_time=parsed_time.isoformat(),
         timezone=timezone,
-        parse_type=parse_type,
-        original_time_text=original_time_text  # ✅ СОХРАНЯЕМ ОРИГИНАЛЬНЫЙ ТЕКСТ
+        parse_type=parse_type
     )
     
     # Показываем пользователю, какое время распознано
     formatted_time = format_local_time(parsed_time, timezone, language)
     
-    confirm_text = {
-        'ru': f"✅ *Время подтверждено:* {formatted_time}\n\n"
-              "📝 *Теперь введите текст напоминания:*\n\n"
-              "Примеры:\n"
-              "• Позвонить маме\n"
-              "• Сходить в музей в 17:30\n"
-              "• Встреча с клиентом\n\n"
-              f"Или просто ответьте на это сообщение с текстом.",
+    # Проверяем, есть ли предзаполненный текст
+    user_data = await state.get_data()
+    prefill_text = user_data.get('prefill_text')
+    
+    if prefill_text:
+        # Есть предзаполненный текст - сразу спрашиваем про повторения
+        await ask_for_repeat_type(message, parsed_time, prefill_text, timezone, language)
+        # Очищаем prefill_text чтобы не мешал
+        await state.update_data(prefill_text=None)
+    else:
+        # Нет предзаполненного текста - запрашиваем текст
+        confirm_text = {
+            'ru': f"✅ *Время подтверждено:* {formatted_time}\n\n"
+                  "📝 *Теперь введите текст напоминания:*\n\n"
+                  "Или введите /cancel для отмены",
+            
+            'en': f"✅ *Time confirmed:* {formatted_time}\n\n"
+                  "📝 *Now enter the reminder text:*\n\n"
+                  "Or enter /cancel to cancel"
+        }
         
-        'en': f"✅ *Time confirmed:* {formatted_time}\n\n"
-              "📝 *Now enter the reminder text:*\n\n"
-              "Examples:\n"
-              "• Call mom\n"
-              "• Go to the museum at 5:30 PM\n"
-              "• Meeting with client\n\n"
-              f"Or just reply to this message with text."
-    }
-    
-    # Отправляем сообщение с просьбой ввести текст
-    msg = await message.answer(
-        confirm_text.get(language, confirm_text['ru']),
-        parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard(language)
-    )
-    
-    # Сохраняем ID сообщения для удобства
-    await state.update_data(last_message_id=msg.message_id)
-    
-    await state.set_state(ReminderState.waiting_for_text)
+        await message.answer(
+            confirm_text.get(language, confirm_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        
+        await state.set_state(ReminderState.waiting_for_text)
 
 @dp.message(ReminderState.waiting_for_text)
 async def process_reminder_text(message: types.Message, state: FSMContext):
