@@ -424,7 +424,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 @dp.message(Command("today"))
 @dp.message(F.text.in_(["📅 На сегодня", "📅 For today"]))
 async def cmd_today(message: types.Message):
-    """Показать напоминания на сегодня"""
+    """Показать напоминания на сегодня - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     user_id = message.from_user.id
     user = db.get_user(user_id)
     
@@ -454,8 +454,8 @@ async def cmd_today(message: types.Message):
     today_reminders = []
     
     for reminder in reminders:
-        # Получаем время напоминания
-        remind_time = reminder.get('next_remind_time_utc')
+        # ИСПРАВЛЕНИЕ: используем remind_time_utc вместо next_remind_time_utc
+        remind_time = reminder.get('remind_time_utc')
         if isinstance(remind_time, str):
             try:
                 remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
@@ -515,7 +515,7 @@ async def cmd_today(message: types.Message):
 @dp.message(Command("tomorrow"))
 @dp.message(F.text.in_(["📆 На завтра", "📆 For tomorrow"]))
 async def cmd_tomorrow(message: types.Message):
-    """Показать напоминания на завтра"""
+    """Показать напоминания на завтра - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     user_id = message.from_user.id
     user = db.get_user(user_id)
     
@@ -546,8 +546,8 @@ async def cmd_tomorrow(message: types.Message):
     tomorrow_reminders = []
     
     for reminder in reminders:
-        # Получаем время напоминания
-        remind_time = reminder.get('next_remind_time_utc')
+        # ИСПРАВЛЕНИЕ: используем remind_time_utc вместо next_remind_time_utc
+        remind_time = reminder.get('remind_time_utc')
         if isinstance(remind_time, str):
             try:
                 remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
