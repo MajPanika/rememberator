@@ -395,6 +395,107 @@ async def cmd_help(message: types.Message):
 
 # ===== НОВАЯ ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЙ (время → текст → повторение) =====
 
+# ===== УМНОЕ СОЗДАНИЕ НАПОМИНАНИЙ (без команд) =====
+
+@dp.message(lambda message: not message.text.startswith('/'))
+async def handle_smart_reminder(message: types.Message, state: FSMContext):
+    """
+    Обработка сообщений без команд.
+    Пытается распознать напоминание в свободной форме.
+    """
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        # Если пользователь не зарегистрирован, запускаем /start
+        return
+    
+    # Если пользователь уже в процессе создания напоминания, пропускаем
+    current_state = await state.get_state()
+    if current_state:
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    text = message.text.strip()
+    
+    # Пробуем распознать время в сообщении
+    time_part, text_part = time_parser.extract_time_and_text(text, language)
+    
+    if not time_part:
+        # Не нашли время - возможно это просто текст
+        # Проверяем, не хочет ли пользователь создать напоминание
+        if len(text) < 50:  # Короткие сообщения игнорируем
+            return
+        
+        # Спрашиваем, хочет ли пользователь создать напоминание
+        ask_text = {
+            'ru': f"📝 *'{text}'*\n\n"
+                  "Хотите создать напоминание с этим текстом?\n"
+                  "Введите время для напоминания или /cancel",
+            'en': f"📝 *'{text}'*\n\n"
+                  "Do you want to create a reminder with this text?\n"
+                  "Enter time for reminder or /cancel"
+        }
+        
+        await state.update_data(
+            prefill_text=text,
+            timezone=timezone,
+            language_code=language
+        )
+        
+        await message.answer(
+            ask_text.get(language, ask_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        
+        await state.set_state(ReminderState.waiting_for_time)
+        return
+    
+    # Нашли время в сообщении
+    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
+    
+    if not parsed_time:
+        # Не удалось распознать время
+        return
+    
+    if text_part:
+        # Есть и время, и текст - показываем подтверждение
+        await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
+        
+        # Сохраняем в состоянии
+        await state.update_data(
+            parsed_time=parsed_time.isoformat(),
+            timezone=timezone,
+            text=text_part
+        )
+    else:
+        # Есть только время - запрашиваем текст
+        formatted_time = format_local_time(parsed_time, timezone, language)
+        
+        request_text = {
+            'ru': f"🕐 *Время распознано:* {formatted_time}\n\n"
+                  "📝 *Введите текст напоминания:*",
+            'en': f"🕐 *Time recognized:* {formatted_time}\n\n"
+                  "📝 *Enter reminder text:*"
+        }
+        
+        await state.update_data(
+            parsed_time=parsed_time.isoformat(),
+            timezone=timezone,
+            parse_type=parse_type
+        )
+        
+        await message.answer(
+            request_text.get(language, request_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        
+        await state.set_state(ReminderState.waiting_for_text)
+
 @dp.message(Command("add"))
 @dp.message(F.text.in_(["➕ Добавить напоминание", "➕ Add reminder"]))
 async def add_reminder_start(message: types.Message, state: FSMContext):
@@ -646,6 +747,21 @@ async def process_reminder_text(message: types.Message, state: FSMContext):
     
     user_data = await state.get_data()
     
+    # Проверяем, есть ли предзаполненный текст
+    prefill_text = user_data.get('prefill_text')
+    
+    if prefill_text and message.text.strip().lower() in ['да', 'yes', 'ок', 'ok', '✅']:
+        # Пользователь подтвердил использование предзаполненного текста
+        text = prefill_text
+        await state.update_data(prefill_text=None)  # Очищаем
+    else:
+        # Используем введенный текст (или предзаполненный если это не подтверждение)
+        if prefill_text:
+            text = prefill_text
+            await state.update_data(prefill_text=None)
+        else:
+            text = message.text.strip()
+    
     # Проверяем, пришли ли мы из /quick команды
     if 'quick_time' in user_data:
         # Это /quick режим - время уже есть, парсим его
@@ -656,7 +772,6 @@ async def process_reminder_text(message: types.Message, state: FSMContext):
         parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
         
         if parsed_time:
-            text = message.text.strip()
             await state.update_data(
                 text=text,
                 parsed_time=parsed_time.isoformat(),
@@ -675,9 +790,7 @@ async def process_reminder_text(message: types.Message, state: FSMContext):
             await state.clear()
         return
     
-    # Обычный режим /add
-    text = message.text.strip()
-    
+    # Обычный режим /add или умное создание
     if not text or len(text) < 2:
         error_text = {
             'ru': "❌ Текст напоминания слишком короткий. Введите снова:",
@@ -695,8 +808,9 @@ async def process_reminder_text(message: types.Message, state: FSMContext):
         await message.answer(error_text.get(language, error_text['ru']))
         return
     
-    # Сохраняем текст
-    await state.update_data(text=text)
+    # Сохраняем текст (если еще не сохранен)
+    if 'text' not in user_data:
+        await state.update_data(text=text)
     
     # Получаем данные из состояния
     user_data = await state.get_data()
@@ -708,6 +822,14 @@ async def process_reminder_text(message: types.Message, state: FSMContext):
         
         # Показываем подтверждение и спрашиваем про повторения
         await ask_for_repeat_type(message, parsed_time, text, timezone, language)
+    else:
+        # Нет времени в состоянии - ошибка
+        error_text = {
+            'ru': "❌ Ошибка: время не найдено. Начните заново с /add",
+            'en': "❌ Error: time not found. Start over with /add"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        await state.clear()
 
 async def ask_for_repeat_type(message: types.Message, parsed_time: datetime, 
                              text: str, timezone: str, language: str):
