@@ -42,7 +42,7 @@ for test_input, expected_time, expected_text in test_cases:
     language = 'ru' if any(cyr in test_input for cyr in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя') else 'en'
     
     # Извлечение времени и текста
-    time_part, text_part = parser.extract_time_and_text(test_input, language)
+    time_part, text_part = parser.extract_best_time_and_text(test_input, language)
     print(f"   Язык: {language}")
     print(f"   Время: '{time_part}' (ожидалось: '{expected_time}')")
     print(f"   Текст: '{text_part}' (ожидалось: '{expected_text}')")
