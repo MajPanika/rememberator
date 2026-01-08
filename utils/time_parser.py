@@ -33,6 +33,8 @@ class TimeParser:
             'date_dmy_words': r'(\d{1,2})\s+(январ[яю]|феврал[яю]|март[ау]|апрел[яю]|ма[яю]|июн[яю]|июл[яю]|август[ау]|сентябр[яю]|октябр[яю]|ноябр[яю]|декабр[яю])(?:\s+(\d{4}))?(?:\s+(?:в\s+)?)?(\d{1,2})(?:[:\.](\d{2}))?\s*(утра|вечера|ночи|дня)?',
             
             'simple_time_ru': r'^в\s+(\d{1,2})(?:[:\.](\d{2}))?\s*(утра|вечера|ночи|дня)?$',
+            'simple_time_with_dash': r'^(\d{1,2})[-\.](\d{2})\s*(утра|вечера|ночи|дня)?$',
+            'time_with_dash': r'(\d{1,2})[-\.](\d{2})\s*(утра|вечера|ночи|дня)?',
             # ВАЖНО: time_no_prep ДО time_only
             'time_no_prep': r'^(\d{1,2})\s+(утра|вечера|ночи|дня)$',
             'time_only': r'^(\d{1,2})(?:[:\.](\d{2}))?\s*(утра|вечера|ночи|дня)?$',
@@ -55,6 +57,8 @@ class TimeParser:
             'date_mdy_words': r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(\d{4}))?(?:\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)?',
             
             'simple_time_en': r'^at\s+(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)?$',
+            'simple_time_with_dash': r'^(\d{1,2})[-\.](\d{2})\s*(AM|PM|am|pm)?$',
+            'time_with_dash': r'(\d{1,2})[-\.](\d{2})\s*(AM|PM|am|pm)?',
             # ВАЖНО: time_ampm ДО time_only
             'time_ampm': r'^(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)$',
             'time_only': r'^(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)?$',
@@ -254,28 +258,51 @@ class TimeParser:
             else:
                 result += timedelta(days=1)
                 return result, "time_only_tomorrow", {'adjusted': True}
+
+        # Добавить перед секцией дат (после time_only):
+
+        # 9. Время с тире или точкой: "22-30", "22.30"
+        match = re.search(self.ru_patterns['simple_time_with_dash'], time_str)
+        if not match:
+            match = re.search(self.ru_patterns['time_with_dash'], time_str)
         
-        # 9. Даты (остаются в конце)
-        match = re.search(self.ru_patterns['date_dmy'], time_str)
         if match:
-            day = int(match.group(1))
-            month = int(match.group(2))
-            year = int(match.group(3)) if match.group(3) else base_time.year
-            hour = int(match.group(4))
-            minute = int(match.group(5)) if match.group(5) else 0
-            time_of_day = match.group(6)
-            
-            if year < 100:
-                year += 2000
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            time_of_day = match.group(3)
             
             hour = self._adjust_hour_ru(hour, time_of_day)
             
-            try:
-                result = datetime(year, month, day, hour, minute, tzinfo=user_tz)
-                return result, "date_dmy", {}
-            except ValueError:
-                pass
+            result = base_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if result > base_time:
+                return result, "time_with_dash_today", {}
+            else:
+                result += timedelta(days=1)
+                return result, "time_with_dash_tomorrow", {'adjusted': True}
         
+                
+                # 10. Даты (остаются в конце)
+                match = re.search(self.ru_patterns['date_dmy'], time_str)
+                if match:
+                    day = int(match.group(1))
+                    month = int(match.group(2))
+                    year = int(match.group(3)) if match.group(3) else base_time.year
+                    hour = int(match.group(4))
+                    minute = int(match.group(5)) if match.group(5) else 0
+                    time_of_day = match.group(6)
+                    
+                    if year < 100:
+                        year += 2000
+                    
+                    hour = self._adjust_hour_ru(hour, time_of_day)
+                    
+                    try:
+                        result = datetime(year, month, day, hour, minute, tzinfo=user_tz)
+                        return result, "date_dmy", {}
+                    except ValueError:
+                        pass
+                        
+        #10 Dates
         match = re.search(self.ru_patterns['date_dmy_words'], time_str)
         if match:
             day = int(match.group(1))
@@ -418,28 +445,50 @@ class TimeParser:
             else:
                 result += timedelta(days=1)
                 return result, "time_only_tomorrow", {'adjusted': True}
+
+        # Добавить перед секцией дат (после time_only):
         
-        # 9. Dates
-        match = re.search(self.en_patterns['date_mdy'], time_str)
+        # 9. Время с тире или точкой: "22-30", "22.30"
+        match = re.search(self.ru_patterns['simple_time_with_dash'], time_str)
+        if not match:
+            match = re.search(self.ru_patterns['time_with_dash'], time_str)
+        
         if match:
-            month = int(match.group(1))
-            day = int(match.group(2))
-            year = int(match.group(3)) if match.group(3) else base_time.year
-            hour = int(match.group(4))
-            minute = int(match.group(5)) if match.group(5) else 0
-            am_pm = match.group(6)
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            time_of_day = match.group(3)
             
-            if year < 100:
-                year += 2000
+            hour = self._adjust_hour_ru(hour, time_of_day)
             
-            hour = self._adjust_hour_en(hour, am_pm)
-            
-            try:
-                result = datetime(year, month, day, hour, minute, tzinfo=user_tz)
-                return result, "date_mdy", {}
-            except ValueError:
-                pass
-        
+            result = base_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if result > base_time:
+                return result, "time_with_dash_today", {}
+            else:
+                result += timedelta(days=1)
+                return result, "time_with_dash_tomorrow", {'adjusted': True}
+                
+                # 9. Dates
+                match = re.search(self.en_patterns['date_mdy'], time_str)
+                if match:
+                    month = int(match.group(1))
+                    day = int(match.group(2))
+                    year = int(match.group(3)) if match.group(3) else base_time.year
+                    hour = int(match.group(4))
+                    minute = int(match.group(5)) if match.group(5) else 0
+                    am_pm = match.group(6)
+                    
+                    if year < 100:
+                        year += 2000
+                    
+                    hour = self._adjust_hour_en(hour, am_pm)
+                    
+                    try:
+                        result = datetime(year, month, day, hour, minute, tzinfo=user_tz)
+                        return result, "date_mdy", {}
+                    except ValueError:
+                        pass
+
+        #10 Dates
         match = re.search(self.en_patterns['date_mdy_words'], time_str)
         if match:
             month_en = match.group(1)
