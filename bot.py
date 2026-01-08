@@ -393,272 +393,6 @@ async def cmd_help(message: types.Message):
         parse_mode="Markdown"
     )
 
-# ===== НОВАЯ ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЙ (время → текст → повторение) =====
-
-# ===== УМНОЕ СОЗДАНИЕ НАПОМИНАНИЙ (без команд) =====
-
-@dp.message(lambda message: not message.text.startswith('/'))
-async def handle_smart_reminder(message: types.Message, state: FSMContext):
-    """
-    Обработка сообщений без команд.
-    Пытается распознать напоминание в свободной форме.
-    """
-    # Исключаем кнопки главного меню
-    menu_buttons = [
-        "➕ Добавить напоминание", "➕ Add reminder",
-        "📋 Мои напоминания", "📋 My reminders",
-        "📅 На сегодня", "📅 For today",
-        "📆 На завтра", "📆 For tomorrow",
-        "⚙️ Настройки", "⚙️ Settings",
-        "❓ Помощь", "❓ Help",
-        "❌ Отмена", "❌ Cancel"
-    ]
-    
-    if message.text in menu_buttons:
-        return  # Пропускаем кнопки - их обработают другие хендлеры
-    
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        # Если пользователь не зарегистрирован, запускаем /start
-        return
-    
-    # Если пользователь уже в процессе создания напоминания, пропускаем
-    current_state = await state.get_state()
-    if current_state:
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    text = message.text.strip()
-    
-    # Пробуем распознать время в сообщении
-    time_part, text_part = time_parser.extract_time_and_text(text, language)
-    
-    if not time_part:
-        # Не нашли время - возможно это просто текст
-        # Проверяем, не хочет ли пользователь создать напоминание
-        if len(text) < 50:  # Короткие сообщения игнорируем
-            return
-        
-        # Спрашиваем, хочет ли пользователь создать напоминание
-        ask_text = {
-            'ru': f"📝 *'{text}'*\n\n"
-                  "Хотите создать напоминание с этим текстом?\n"
-                  "Введите время для напоминания или /cancel",
-            'en': f"📝 *'{text}'*\n\n"
-                  "Do you want to create a reminder with this text?\n"
-                  "Enter time for reminder or /cancel"
-        }
-        
-        await state.update_data(
-            prefill_text=text,
-            timezone=timezone,
-            language_code=language
-        )
-        
-        await message.answer(
-            ask_text.get(language, ask_text['ru']),
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard(language)
-        )
-        
-        await state.set_state(ReminderState.waiting_for_time)
-        return
-    
-    # Нашли время в сообщении
-    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
-    
-    if not parsed_time:
-        # Не удалось распознать время
-        return
-    
-    if text_part:
-        # Есть и время, и текст - показываем подтверждение
-        await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
-        
-        # Сохраняем в состоянии
-        await state.update_data(
-            parsed_time=parsed_time.isoformat(),
-            timezone=timezone,
-            text=text_part
-        )
-    else:
-        # Есть только время - запрашиваем текст
-        formatted_time = format_local_time(parsed_time, timezone, language)
-        
-        request_text = {
-            'ru': f"🕐 *Время распознано:* {formatted_time}\n\n"
-                  "📝 *Введите текст напоминания:*",
-            'en': f"🕐 *Time recognized:* {formatted_time}\n\n"
-                  "📝 *Enter reminder text:*"
-        }
-        
-        await state.update_data(
-            parsed_time=parsed_time.isoformat(),
-            timezone=timezone,
-            parse_type=parse_type
-        )
-        
-        await message.answer(
-            request_text.get(language, request_text['ru']),
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard(language)
-        )
-        
-        await state.set_state(ReminderState.waiting_for_text)
-
-@dp.message(Command("add"))
-@dp.message(F.text.in_(["➕ Добавить напоминание", "➕ Add reminder"]))
-async def add_reminder_start(message: types.Message, state: FSMContext):
-    """Начало добавления напоминания - сначала время!"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    # Проверяем лимит
-    count = db.get_user_reminder_count(user_id)
-    if count >= Config.MAX_REMINDERS_PER_USER:
-        limit_text = {
-            'ru': f"⚠️ Достигнут лимит в {Config.MAX_REMINDERS_PER_USER} напоминаний!\n"
-                  f"У вас {count} активных напоминаний.\n\n"
-                  "Удалите старые или поставьте на паузу, чтобы добавить новые.",
-            'en': f"⚠️ Reached limit of {Config.MAX_REMINDERS_PER_USER} reminders!\n"
-                  f"You have {count} active reminders.\n\n"
-                  "Delete old ones or pause them to add new."
-        }
-        await message.answer(
-            limit_text.get(language, limit_text['ru']),
-            parse_mode="Markdown"
-        )
-        return
-    
-    # Запрашиваем время напоминания
-    time_request = {
-        'ru': "🕐 *Сначала укажите время напоминания*\n\n"
-              "📋 *Примеры:*\n"
-              "• Завтра 15:30\n"
-              "• Сегодня в 18:00\n"
-              "• Через 2 часа\n"
-              "• Понедельник в 9 утра\n"
-              "• 31.12.2024 23:59\n\n"
-              "Или просто время:\n"
-              "• 20:30 (сегодня в 20:30)\n"
-              "• 8 утра (завтра в 8 утра, если уже позже)",
-        
-        'en': "🕐 *First, specify the reminder time*\n\n"
-              "📋 *Examples:*\n"
-              "• Tomorrow 3:30 PM\n"
-              "• Today at 6:00 PM\n"
-              "• In 2 hours\n"
-              "• Monday at 9 AM\n"
-              "• 12/31/2024 11:59 PM\n\n"
-              "Or just time:\n"
-              "• 20:30 (today at 8:30 PM)\n"
-              "• 8 AM (tomorrow at 8 AM if it's already later)"
-    }
-    
-    # Получаем примеры из парсера
-    examples = time_parser.get_examples(language)
-    examples_text = "\n".join([f"• {example}" for example in examples[:8]])
-    
-    full_text = f"{time_request.get(language, time_request['ru'])}\n\n{examples_text}"
-    
-    await message.answer(
-        full_text,
-        parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard(language)
-    )
-    
-    await state.set_state(ReminderState.waiting_for_time)
-
-@dp.message(Command("quick"))
-async def cmd_quick(message: types.Message, state: FSMContext):
-    """Быстрое создание напоминания в формате "время текст" """
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Получаем текст команды без "/quick"
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        help_text = {
-            'ru': "⚡ *Быстрое создание напоминания*\n\n"
-                  "Формат:\n`/quick завтра 15:30 сходить в музей`\n\n"
-                  "Или:\n`/quick через 2 часа позвонить маме`",
-            'en': "⚡ *Quick reminder creation*\n\n"
-                  "Format:\n`/quick tomorrow 3:30 PM go to museum`\n\n"
-                  "Or:\n`/quick in 2 hours call mom`"
-        }
-        await message.answer(help_text.get(language, help_text['ru']), parse_mode="Markdown")
-        return
-    
-    full_text = args[1]
-    
-    # Пробуем разделить на время и текст
-    time_part, text_part = time_parser.extract_time_and_text(full_text, language)
-    
-    if not time_part:
-        # Не нашли время - просим указать отдельно
-        error_text = {
-            'ru': "❌ Не удалось найти время в вашем сообщении.\n\n"
-                  "Попробуйте:\n`/quick завтра 15:30 текст`\n\n"
-                  "Или используйте обычный режим: /add",
-            'en': "❌ Could not find time in your message.\n\n"
-                  "Try:\n`/quick tomorrow 3:30 PM text`\n\n"
-                  "Or use regular mode: /add"
-        }
-        await message.answer(error_text.get(language, error_text['ru']), parse_mode="Markdown")
-        return
-    
-    if not text_part:
-        # Нашли время, но нет текста
-        text_request = {
-            'ru': f"🕐 *Время распознано:* {time_part}\n\n"
-                  "📝 *Введите текст напоминания:*",
-            'en': f"🕐 *Time recognized:* {time_part}\n\n"
-                  "📝 *Enter reminder text:*"
-        }
-        
-        await state.update_data(quick_time=time_part, timezone=timezone, language_code=language)
-        await state.set_state(ReminderState.waiting_for_text)
-        await message.answer(text_request.get(language, text_request['ru']), parse_mode="Markdown")
-        return
-    
-    # Есть и время, и текст - парсим время
-    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
-    
-    if not parsed_time:
-        error_text = {
-            'ru': f"❌ Не удалось распознать время: '{time_part}'",
-            'en': f"❌ Could not recognize time: '{time_part}'"
-        }
-        await message.answer(error_text.get(language, error_text['ru']))
-        return
-    
-    # Показываем подтверждение и спрашиваем про повторения
-    await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
-    
-    # Сохраняем в состоянии
-    await state.update_data(
-        parsed_time=parsed_time.isoformat(),
-        timezone=timezone,
-        text=text_part
-    )
-
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     """Отмена текущей операции"""
@@ -684,651 +418,6 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
             'en': "ℹ️ No active operations to cancel."
         }
         await message.answer(no_op_text.get(language, no_op_text['ru']))
-
-@dp.message(ReminderState.waiting_for_time)
-async def process_reminder_time(message: types.Message, state: FSMContext):
-    """Обработка времени напоминания"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Проверяем отмену (более широкий список)
-    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel", "отменить", "cancelar"]
-    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
-        await handle_cancel(message, state, language)
-        return
-    
-    original_time_text = message.text.strip()
-    
-    # Сначала пробуем распарсить как "11 января 16-00 театр в 18-00"
-    # Извлекаем время из строки
-    extracted_time, extracted_text = time_parser.extract_time_and_text(original_time_text, language)
-    
-    if extracted_time and not extracted_text:
-        # В строке только время (без дополнительного текста)
-        time_to_parse = extracted_time
-    elif extracted_time and extracted_text:
-        # В строке и время, и текст - сохраняем текст для предзаполнения
-        time_to_parse = extracted_time
-        await state.update_data(prefill_text=extracted_text)
-    else:
-        # Не нашли время в привычном формате, пробуем парсить всю строку
-        time_to_parse = original_time_text
-    
-    # Парсим время
-    parsed_time, parse_type, extra_info = time_parser.parse(
-        time_to_parse, language, timezone
-    )
-    
-    if not parsed_time:
-        # Не удалось распознать время
-        error_text = {
-            'ru': f"❌ Не удалось распознать время: '{original_time_text}'\n\n"
-                  "Попробуйте другие форматы:\n"
-                  "• Завтра 15:30\n"
-                  "• 20:00\n"
-                  "• Через 2 часа\n"
-                  "• 11.01.2024 16:00\n\n"
-                  "Или введите /cancel для отмены",
-            'en': f"❌ Could not recognize time: '{original_time_text}'\n\n"
-                  "Try other formats:\n"
-                  "• Tomorrow 3:30 PM\n"
-                  "• 8:00 PM\n"
-                  "• In 2 hours\n"
-                  "• 01/11/2024 4:00 PM\n\n"
-                  "Or enter /cancel to cancel"
-        }
-        
-        await message.answer(
-            error_text.get(language, error_text['ru']),
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard(language)
-        )
-        return
-    
-    # Проверяем корректность времени
-    is_valid, error_msg = time_parser.validate_time(parsed_time)
-    if not is_valid:
-        error_text = {
-            'ru': f"❌ {error_msg}\n\nВведите другое время или /cancel",
-            'en': f"❌ {error_msg}\n\nEnter another time or /cancel"
-        }
-        await message.answer(
-            error_text.get(language, error_text['ru']),
-            reply_markup=get_cancel_keyboard(language)
-        )
-        return
-    
-    # Сохраняем время в состоянии
-    await state.update_data(
-        parsed_time=parsed_time.isoformat(),
-        timezone=timezone,
-        parse_type=parse_type
-    )
-    
-    # Показываем пользователю, какое время распознано
-    formatted_time = format_local_time(parsed_time, timezone, language)
-    
-    # Проверяем, есть ли предзаполненный текст
-    user_data = await state.get_data()
-    prefill_text = user_data.get('prefill_text')
-    
-    if prefill_text:
-        # Есть предзаполненный текст - сразу спрашиваем про повторения
-        await ask_for_repeat_type(message, parsed_time, prefill_text, timezone, language)
-        # Очищаем prefill_text чтобы не мешал
-        await state.update_data(prefill_text=None)
-    else:
-        # Нет предзаполненного текста - запрашиваем текст
-        confirm_text = {
-            'ru': f"✅ *Время подтверждено:* {formatted_time}\n\n"
-                  "📝 *Теперь введите текст напоминания:*\n\n"
-                  "Или введите /cancel для отмены",
-            
-            'en': f"✅ *Time confirmed:* {formatted_time}\n\n"
-                  "📝 *Now enter the reminder text:*\n\n"
-                  "Or enter /cancel to cancel"
-        }
-        
-        await message.answer(
-            confirm_text.get(language, confirm_text['ru']),
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard(language)
-        )
-        
-        await state.set_state(ReminderState.waiting_for_text)
-
-@dp.message(ReminderState.waiting_for_text)
-async def process_reminder_text(message: types.Message, state: FSMContext):
-    """Обработка текста напоминания"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    language = user.get('language_code', 'ru')
-    
-    # Проверяем отмену
-    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel"]
-    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
-        await handle_cancel(message, state, language)
-        return
-    
-    user_data = await state.get_data()
-    
-    # Проверяем, есть ли предзаполненный текст
-    prefill_text = user_data.get('prefill_text')
-    
-    if prefill_text and message.text.strip().lower() in ['да', 'yes', 'ок', 'ok', '✅']:
-        # Пользователь подтвердил использование предзаполненного текста
-        text = prefill_text
-        await state.update_data(prefill_text=None)  # Очищаем
-    else:
-        # Используем введенный текст (или предзаполненный если это не подтверждение)
-        if prefill_text:
-            text = prefill_text
-            await state.update_data(prefill_text=None)
-        else:
-            text = message.text.strip()
-    
-    # Проверяем, пришли ли мы из /quick команды
-    if 'quick_time' in user_data:
-        # Это /quick режим - время уже есть, парсим его
-        timezone = user_data.get('timezone', 'Europe/Moscow')
-        language = user_data.get('language_code', 'ru')
-        time_part = user_data['quick_time']
-        
-        parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
-        
-        if parsed_time:
-            await state.update_data(
-                text=text,
-                parsed_time=parsed_time.isoformat(),
-                quick_time=None  # Удаляем временный ключ
-            )
-            
-            # Переходим к выбору повторения
-            await ask_for_repeat_type(message, parsed_time, text, timezone, language)
-        else:
-            # Ошибка парсинга
-            error_text = {
-                'ru': f"❌ Ошибка: не удалось распознать время '{time_part}'",
-                'en': f"❌ Error: could not recognize time '{time_part}'"
-            }
-            await message.answer(error_text.get(language, error_text['ru']))
-            await state.clear()
-        return
-    
-    # Обычный режим /add или умное создание
-    if not text or len(text) < 2:
-        error_text = {
-            'ru': "❌ Текст напоминания слишком короткий. Введите снова:",
-            'en': "❌ Reminder text is too short. Enter again:"
-        }
-        await message.answer(error_text.get(language, error_text['ru']))
-        return
-    
-    # Проверяем максимальную длину
-    if len(text) > Config.MAX_TEXT_LENGTH:
-        error_text = {
-            'ru': f"❌ Текст слишком длинный (макс. {Config.MAX_TEXT_LENGTH} символов)",
-            'en': f"❌ Text too long (max {Config.MAX_TEXT_LENGTH} characters)"
-        }
-        await message.answer(error_text.get(language, error_text['ru']))
-        return
-    
-    # Сохраняем текст (если еще не сохранен)
-    if 'text' not in user_data:
-        await state.update_data(text=text)
-    
-    # Получаем данные из состояния
-    user_data = await state.get_data()
-    parsed_time_str = user_data.get('parsed_time')
-    timezone = user_data.get('timezone', 'Europe/Moscow')
-    
-    if parsed_time_str:
-        parsed_time = datetime.fromisoformat(parsed_time_str)
-        
-        # Показываем подтверждение и спрашиваем про повторения
-        await ask_for_repeat_type(message, parsed_time, text, timezone, language)
-    else:
-        # Нет времени в состоянии - ошибка
-        error_text = {
-            'ru': "❌ Ошибка: время не найдено. Начните заново с /add",
-            'en': "❌ Error: time not found. Start over with /add"
-        }
-        await message.answer(error_text.get(language, error_text['ru']))
-        await state.clear()
-
-async def ask_for_repeat_type(message: types.Message, parsed_time: datetime, 
-                             text: str, timezone: str, language: str):
-    """Спросить тип повторения"""
-    formatted_time = format_local_time(parsed_time, timezone, language)
-    
-    confirm_text = {
-        'ru': f"📝 *Текст:* {text}\n"
-              f"⏰ *Время:* {formatted_time}\n\n"
-              "Это повторяющееся напоминание?",
-        'en': f"📝 *Text:* {text}\n"
-              f"⏰ *Time:* {formatted_time}\n\n"
-              "Is this a repeating reminder?"
-    }
-    
-    builder = InlineKeyboardBuilder()
-    
-    if language == 'ru':
-        builder.row(
-            InlineKeyboardButton(text="✅ Разовое", callback_data="repeat_once"),
-            InlineKeyboardButton(text="🔄 Ежедневное", callback_data="repeat_daily"),
-        )
-        builder.row(
-            InlineKeyboardButton(text="📅 Еженедельное", callback_data="repeat_weekly"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="repeat_cancel")
-        )
-    else:
-        builder.row(
-            InlineKeyboardButton(text="✅ One-time", callback_data="repeat_once"),
-            InlineKeyboardButton(text="🔄 Daily", callback_data="repeat_daily"),
-        )
-        builder.row(
-            InlineKeyboardButton(text="📅 Weekly", callback_data="repeat_weekly"),
-            InlineKeyboardButton(text="❌ Cancel", callback_data="repeat_cancel")
-        )
-    
-    await message.answer(
-        confirm_text.get(language, confirm_text['ru']),
-        parse_mode="Markdown",
-        reply_markup=builder.as_markup()
-    )
-
-# ===== ОБРАБОТКА CALLBACK'ОВ ДЛЯ ПОВТОРЕНИЙ =====
-
-@dp.callback_query(F.data.startswith("repeat_"))
-async def handle_repeat_type(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка выбора типа повторения"""
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    language = user.get('language_code', 'ru')
-    
-    if callback.data == "repeat_cancel":
-        # Отмена
-        await state.clear()
-        cancel_text = {
-            'ru': "❌ Создание напоминания отменено",
-            'en': "❌ Reminder creation cancelled"
-        }
-        await callback.message.edit_text(
-            cancel_text.get(language, cancel_text['ru'])
-        )
-        await callback.message.answer(
-            "Меню:" if language == 'ru' else "Menu:",
-            reply_markup=get_main_keyboard(language)
-        )
-        await callback.answer()
-        return
-    
-    # Получаем данные из состояния
-    user_data = await state.get_data()
-    text = user_data.get('text', '')
-    parsed_time_str = user_data.get('parsed_time')
-    timezone = user_data.get('timezone', 'Europe/Moscow')
-    
-    if not parsed_time_str:
-        await callback.answer("Ошибка: время не найдено", show_alert=True)
-        return
-    
-    parsed_time = datetime.fromisoformat(parsed_time_str)
-    
-    # Определяем тип повторения
-    repeat_type = callback.data.replace("repeat_", "")
-    
-    if repeat_type == "once":
-        # Разовое напоминание - сразу создаем
-        await create_reminder(
-            user_id, text, parsed_time, timezone,
-            repeat_type='once', repeat_days=None,
-            callback=callback, language=language
-        )
-        await state.clear()
-        
-    elif repeat_type == "daily":
-        # Ежедневное - сразу создаем
-        await create_reminder(
-            user_id, text, parsed_time, timezone,
-            repeat_type='daily', repeat_days=None,
-            callback=callback, language=language
-        )
-        await state.clear()
-        
-    elif repeat_type == "weekly":
-        # Еженедельное - нужно выбрать дни недели
-        await ask_for_weekdays(callback.message, language, state)
-        await callback.answer()
-
-async def ask_for_weekdays(message: types.Message, language: str, state: FSMContext):
-    """Запросить выбор дней недели для еженедельного напоминания"""
-    weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    
-    weekdays = weekdays_ru if language == 'ru' else weekdays_en
-    
-    builder = InlineKeyboardBuilder()
-    
-    # Дни недели (пока не выбраны)
-    for i, day in enumerate(weekdays):
-        builder.add(InlineKeyboardButton(
-            text=f"□ {day}", 
-            callback_data=f"weekly_day_{i}"
-        ))
-    
-    builder.adjust(4, 3)
-    
-    # Кнопки действий
-    action_row = []
-    if language == 'ru':
-        action_row.extend([
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data="weekly_confirm"),
-            InlineKeyboardButton(text="📅 Все дни", callback_data="weekly_all"),
-            InlineKeyboardButton(text="📅 Будни", callback_data="weekly_workdays"),
-        ])
-    else:
-        action_row.extend([
-            InlineKeyboardButton(text="✅ Confirm", callback_data="weekly_confirm"),
-            InlineKeyboardButton(text="📅 All days", callback_data="weekly_all"),
-            InlineKeyboardButton(text="📅 Weekdays", callback_data="weekly_workdays"),
-        ])
-    
-    builder.row(*action_row)
-    
-    builder.row(
-        InlineKeyboardButton(
-            text="❌ Отмена" if language == 'ru' else "❌ Cancel",
-            callback_data="weekly_cancel"
-        )
-    )
-    
-    question_text = {
-        'ru': "📅 *Выберите дни недели для повторения:*\n\n"
-              "Нажмите на день, чтобы выбрать/отменить.",
-        'en': "📅 *Select weekdays for repetition:*\n\n"
-              "Click on a day to select/deselect."
-    }
-    
-    await message.answer(
-        question_text.get(language, question_text['ru']),
-        parse_mode="Markdown",
-        reply_markup=builder.as_markup()
-    )
-
-@dp.callback_query(F.data.startswith("weekly_"))
-async def handle_weekly_selection(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка выбора дней недели"""
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    language = user.get('language_code', 'ru')
-    
-    data = callback.data
-    
-    if data == "weekly_cancel":
-        # Отмена
-        await state.clear()
-        cancel_text = {
-            'ru': "❌ Создание напоминания отменено",
-            'en': "❌ Reminder creation cancelled"
-        }
-        await callback.message.edit_text(
-            cancel_text.get(language, cancel_text['ru'])
-        )
-        await callback.message.answer(
-            "Меню:" if language == 'ru' else "Menu:",
-            reply_markup=get_main_keyboard(language)
-        )
-        await callback.answer()
-        return
-    
-    # Получаем текущий выбор из состояния
-    user_data = await state.get_data()
-    selected_days = user_data.get('weekly_days', [])
-    
-    if data.startswith("weekly_day_"):
-        # Выбор/отмена дня
-        day_index = int(data.split("_")[2])
-        
-        if day_index in selected_days:
-            selected_days.remove(day_index)
-        else:
-            selected_days.append(day_index)
-        
-        selected_days.sort()
-        await state.update_data(weekly_days=selected_days)
-        
-        # Обновляем клавиатуру
-        await update_weekly_keyboard(callback.message, selected_days, language)
-        await callback.answer()
-        
-    elif data == "weekly_all":
-        # Выбрать все дни
-        selected_days = list(range(7))
-        await state.update_data(weekly_days=selected_days)
-        await update_weekly_keyboard(callback.message, selected_days, language)
-        await callback.answer("Все дни выбраны")
-        
-    elif data == "weekly_workdays":
-        # Выбрать будни (пн-пт)
-        selected_days = list(range(5))  # 0-4 = Пн-Пт
-        await state.update_data(weekly_days=selected_days)
-        await update_weekly_keyboard(callback.message, selected_days, language)
-        await callback.answer("Будни выбраны" if language == 'ru' else "Weekdays selected")
-        
-    elif data == "weekly_confirm":
-        # Подтверждение выбора дней
-        if not selected_days:
-            error_text = {
-                'ru': "❌ Нужно выбрать хотя бы один день недели!",
-                'en': "❌ Need to select at least one weekday!"
-            }
-            await callback.answer(
-                error_text.get(language, error_text['ru']),
-                show_alert=True
-            )
-            return
-        
-        # Создаем напоминание
-        user_data = await state.get_data()
-        text = user_data.get('text', '')
-        parsed_time_str = user_data.get('parsed_time')
-        timezone = user_data.get('timezone', 'Europe/Moscow')
-        
-        if not parsed_time_str:
-            await callback.answer("Ошибка: время не найдено", show_alert=True)
-            return
-        
-        parsed_time = datetime.fromisoformat(parsed_time_str)
-        
-        # Преобразуем список дней в строку
-        repeat_days = ",".join(str(day) for day in selected_days)
-        
-        await create_reminder(
-            user_id, text, parsed_time, timezone,
-            repeat_type='weekly', repeat_days=repeat_days,
-            callback=callback, language=language
-        )
-        
-        await state.clear()
-
-async def update_weekly_keyboard(message: types.Message, selected_days: list, language: str):
-    """Обновить клавиатуру выбора дней недели"""
-    weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    
-    weekdays = weekdays_ru if language == 'ru' else weekdays_en
-    
-    builder = InlineKeyboardBuilder()
-    
-    # Обновленные дни недели
-    for i, day in enumerate(weekdays):
-        if i in selected_days:
-            builder.add(InlineKeyboardButton(
-                text=f"✅ {day}", 
-                callback_data=f"weekly_day_{i}"
-            ))
-        else:
-            builder.add(InlineKeyboardButton(
-                text=f"□ {day}", 
-                callback_data=f"weekly_day_{i}"
-            ))
-    
-    builder.adjust(4, 3)
-    
-    # Кнопки действий
-    action_row = []
-    if language == 'ru':
-        action_row.extend([
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data="weekly_confirm"),
-            InlineKeyboardButton(text="📅 Все дни", callback_data="weekly_all"),
-            InlineKeyboardButton(text="📅 Будни", callback_data="weekly_workdays"),
-        ])
-    else:
-        action_row.extend([
-            InlineKeyboardButton(text="✅ Confirm", callback_data="weekly_confirm"),
-            InlineKeyboardButton(text="📅 All days", callback_data="weekly_all"),
-            InlineKeyboardButton(text="📅 Weekdays", callback_data="weekly_workdays"),
-        ])
-    
-    builder.row(*action_row)
-    
-    builder.row(
-        InlineKeyboardButton(
-            text="❌ Отмена" if language == 'ru' else "❌ Cancel",
-            callback_data="weekly_cancel"
-        )
-    )
-    
-    # Обновляем сообщение
-    question_text = {
-        'ru': f"📅 *Выбрано дней: {len(selected_days)}*\n\n"
-              "Нажмите на день, чтобы выбрать/отменить.",
-        'en': f"📅 *Selected days: {len(selected_days)}*\n\n"
-              "Click on a day to select/deselect."
-    }
-    
-    await message.edit_text(
-        question_text.get(language, question_text['ru']),
-        parse_mode="Markdown",
-        reply_markup=builder.as_markup()
-    )
-
-async def create_reminder(user_id: int, text: str, parsed_time: datetime, 
-                         timezone: str, repeat_type: str, repeat_days: str,
-                         callback: types.CallbackQuery, language: str):
-    """Создать напоминание в БД"""
-    try:
-        # ВАЖНО: parsed_time уже в правильном часовом поясе пользователя
-        # Нужно конвертировать в UTC для хранения
-        
-        # Создаем часовой пояс пользователя
-        user_tz = pytz.timezone(timezone)
-        
-        # Делаем время aware (с часовым поясом)
-        if parsed_time.tzinfo is None:
-            # Если время naive, добавляем часовой пояс пользователя
-            parsed_time = user_tz.localize(parsed_time)
-        
-        # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ И СЕКУНДЫ
-        # Приводим к целым минутам
-        parsed_time = parsed_time.replace(second=0, microsecond=0)
-        
-        # Конвертируем в UTC
-        utc_time = parsed_time.astimezone(pytz.UTC)
-        
-        # Отладочная информация
-        logger.info(f"Создание напоминания: пользователь {user_id}")
-        logger.info(f"  Местное время: {parsed_time} ({timezone})")
-        logger.info(f"  UTC время: {utc_time}")
-        
-        # Для тестирования: если время в прошлом, добавляем 1 минуту
-        now_utc = datetime.now(pytz.UTC).replace(second=0, microsecond=0)
-        if utc_time < now_utc and repeat_type == 'once':
-            # Для разовых напоминаний в прошлом - добавляем минуту для теста
-            utc_time = now_utc + timedelta(minutes=1)
-            logger.info(f"  Время в прошлом, смещаем на: {utc_time}")
-        
-        # Добавляем напоминание в БД
-        reminder_id = db.add_reminder(
-            user_id=user_id,
-            text=text,
-            remind_time_utc=utc_time,
-            repeat_type=repeat_type,
-            repeat_days=repeat_days,
-            timezone=timezone
-        )
-        
-        # Форматируем для вывода (в местном времени пользователя)
-        formatted_time = format_local_time(parsed_time, timezone, language)
-        
-        # Текст подтверждения
-        if repeat_type == 'once':
-            repeat_text = {
-                'ru': "✅ Разовое",
-                'en': "✅ One-time"
-            }.get(language, "✅ One-time")
-        elif repeat_type == 'daily':
-            repeat_text = {
-                'ru': "🔄 Ежедневное",
-                'en': "🔄 Daily"
-            }.get(language, "🔄 Daily")
-        elif repeat_type == 'weekly':
-            # Форматируем дни недели
-            days_list = [int(d) for d in repeat_days.split(',')] if repeat_days else []
-            weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-            weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            weekdays = weekdays_ru if language == 'ru' else weekdays_en
-            
-            selected_days = [weekdays[d] for d in days_list]
-            days_str = ", ".join(selected_days)
-            repeat_text = f"📅 Еженедельное ({days_str})" if language == 'ru' else f"📅 Weekly ({days_str})"
-        else:
-            repeat_text = ""
-        
-        success_text = {
-            'ru': f"🎉 *Напоминание создано!*\n\n"
-                  f"📝 *Текст:* {text}\n"
-                  f"⏰ *Время:* {formatted_time}\n"
-                  f"🔄 *Тип:* {repeat_text}\n"
-                  f"🆔 *ID:* {reminder_id}\n\n"
-                  f"Используйте /list для просмотра всех напоминаний.",
-            'en': f"🎉 *Reminder created!*\n\n"
-                  f"📝 *Text:* {text}\n"
-                  f"⏰ *Time:* {formatted_time}\n"
-                  f"🔄 *Type:* {repeat_text}\n"
-                  f"🆔 *ID:* {reminder_id}\n\n"
-                  f"Use /list to view all reminders."
-        }
-        
-        await callback.message.edit_text(
-            success_text.get(language, success_text['en']),
-            parse_mode="Markdown"
-        )
-        
-        await callback.message.answer(
-            "Меню:" if language == 'ru' else "Menu:",
-            reply_markup=get_main_keyboard(language)
-        )
-        
-        await callback.answer()
-        
-        # Логируем создание
-        logger.info(f"Reminder {reminder_id} created for user {user_id}")
-        
-    except Exception as e:
-        error_text = {
-            'ru': f"❌ Ошибка при создании напоминания: {str(e)}",
-            'en': f"❌ Error creating reminder: {str(e)}"
-        }
-        
-        await callback.message.edit_text(
-            error_text.get(language, error_text['ru'])
-        )
-        
-        logger.error(f"Failed to create reminder for user {user_id}: {e}", exc_info=True)
 
 # ===== КОМАНДЫ ДЛЯ СЕГОДНЯ/ЗАВТРА =====
 
@@ -1974,44 +1063,6 @@ async def cmd_calendar(message: types.Message):
     
     await message.answer(full_text, parse_mode="Markdown")
 
-# ===== ОБРАБОТКА КНОПКИ НАСТРОЕК =====
-
-@dp.message(F.text.in_(["⚙️ Настройки", "⚙️ Settings"]))
-async def cmd_settings_button(message: types.Message):
-    """Обработка кнопки настроек"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    settings_text = {
-        'ru': "⚙️ *Настройки*\n\n"
-              "Выберите опцию:\n"
-              "/language - Сменить язык\n"
-              "/timezone - Установить часовой пояс\n"
-              "/stats - Статистика\n\n"
-              "Текущие настройки:\n"
-              f"🌐 Язык: {'Русский' if language == 'ru' else 'English'}\n"
-              f"🕒 Часовой пояс: {user.get('timezone', 'Europe/Moscow')}",
-        'en': "⚙️ *Settings*\n\n"
-              "Choose an option:\n"
-              "/language - Change language\n"
-              "/timezone - Set timezone\n"
-              "/stats - Statistics\n\n"
-              "Current settings:\n"
-              f"🌐 Language: {'Russian' if language == 'ru' else 'English'}\n"
-              f"🕒 Timezone: {user.get('timezone', 'Europe/Moscow')}"
-    }
-    
-    await message.answer(
-        settings_text.get(language, settings_text['en']),
-        parse_mode="Markdown"
-    )
-
 # ===== ТЕСТОВЫЕ КОМАНДЫ =====
 
 @dp.message(Command("test_time"))
@@ -2077,6 +1128,975 @@ async def cmd_check_now(message: types.Message):
     }
     
     await message.answer(response.get(language, response['en']))
+
+@dp.message(Command("add"))
+@dp.message(F.text.in_(["➕ Добавить напоминание", "➕ Add reminder"]))
+async def add_reminder_start(message: types.Message, state: FSMContext):
+    """Начало добавления напоминания - сначала время!"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Проверяем лимит
+    count = db.get_user_reminder_count(user_id)
+    if count >= Config.MAX_REMINDERS_PER_USER:
+        limit_text = {
+            'ru': f"⚠️ Достигнут лимит в {Config.MAX_REMINDERS_PER_USER} напоминаний!\n"
+                  f"У вас {count} активных напоминаний.\n\n"
+                  "Удалите старые или поставьте на паузу, чтобы добавить новые.",
+            'en': f"⚠️ Reached limit of {Config.MAX_REMINDERS_PER_USER} reminders!\n"
+                  f"You have {count} active reminders.\n\n"
+                  "Delete old ones or pause them to add new."
+        }
+        await message.answer(
+            limit_text.get(language, limit_text['ru']),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Запрашиваем время напоминания
+    time_request = {
+        'ru': "🕐 *Сначала укажите время напоминания*\n\n"
+              "📋 *Примеры:*\n"
+              "• Завтра 15:30\n"
+              "• Сегодня в 18:00\n"
+              "• Через 2 часа\n"
+              "• Понедельник в 9 утра\n"
+              "• 31.12.2024 23:59\n\n"
+              "Или просто время:\n"
+              "• 20:30 (сегодня в 20:30)\n"
+              "• 8 утра (завтра в 8 утра, если уже позже)",
+        
+        'en': "🕐 *First, specify the reminder time*\n\n"
+              "📋 *Examples:*\n"
+              "• Tomorrow 3:30 PM\n"
+              "• Today at 6:00 PM\n"
+              "• In 2 hours\n"
+              "• Monday at 9 AM\n"
+              "• 12/31/2024 11:59 PM\n\n"
+              "Or just time:\n"
+              "• 20:30 (today at 8:30 PM)\n"
+              "• 8 AM (tomorrow at 8 AM if it's already later)"
+    }
+    
+    # Получаем примеры из парсера
+    examples = time_parser.get_examples(language)
+    examples_text = "\n".join([f"• {example}" for example in examples[:8]])
+    
+    full_text = f"{time_request.get(language, time_request['ru'])}\n\n{examples_text}"
+    
+    await message.answer(
+        full_text,
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard(language)
+    )
+    
+    await state.set_state(ReminderState.waiting_for_time)
+
+@dp.message(Command("quick"))
+async def cmd_quick(message: types.Message, state: FSMContext):
+    """Быстрое создание напоминания в формате "время текст" """
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Получаем текст команды без "/quick"
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        help_text = {
+            'ru': "⚡ *Быстрое создание напоминания*\n\n"
+                  "Формат:\n`/quick завтра 15:30 сходить в музей`\n\n"
+                  "Или:\n`/quick через 2 часа позвонить маме`",
+            'en': "⚡ *Quick reminder creation*\n\n"
+                  "Format:\n`/quick tomorrow 3:30 PM go to museum`\n\n"
+                  "Or:\n`/quick in 2 hours call mom`"
+        }
+        await message.answer(help_text.get(language, help_text['ru']), parse_mode="Markdown")
+        return
+    
+    full_text = args[1]
+    
+    # Пробуем разделить на время и текст
+    time_part, text_part = time_parser.extract_time_and_text(full_text, language)
+    
+    if not time_part:
+        # Не нашли время - просим указать отдельно
+        error_text = {
+            'ru': "❌ Не удалось найти время в вашем сообщении.\n\n"
+                  "Попробуйте:\n`/quick завтра 15:30 текст`\n\n"
+                  "Или используйте обычный режим: /add",
+            'en': "❌ Could not find time in your message.\n\n"
+                  "Try:\n`/quick tomorrow 3:30 PM text`\n\n"
+                  "Or use regular mode: /add"
+        }
+        await message.answer(error_text.get(language, error_text['ru']), parse_mode="Markdown")
+        return
+    
+    if not text_part:
+        # Нашли время, но нет текста
+        text_request = {
+            'ru': f"🕐 *Время распознано:* {time_part}\n\n"
+                  "📝 *Введите текст напоминания:*",
+            'en': f"🕐 *Time recognized:* {time_part}\n\n"
+                  "📝 *Enter reminder text:*"
+        }
+        
+        await state.update_data(quick_time=time_part, timezone=timezone, language_code=language)
+        await state.set_state(ReminderState.waiting_for_text)
+        await message.answer(text_request.get(language, text_request['ru']), parse_mode="Markdown")
+        return
+    
+    # Есть и время, и текст - парсим время
+    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
+    
+    if not parsed_time:
+        error_text = {
+            'ru': f"❌ Не удалось распознать время: '{time_part}'",
+            'en': f"❌ Could not recognize time: '{time_part}'"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Показываем подтверждение и спрашиваем про повторения
+    await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
+    
+    # Сохраняем в состоянии
+    await state.update_data(
+        parsed_time=parsed_time.isoformat(),
+        timezone=timezone,
+        text=text_part
+    )
+
+@dp.message(ReminderState.waiting_for_time)
+async def process_reminder_time(message: types.Message, state: FSMContext):
+    """Обработка времени напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Проверяем отмену (более широкий список)
+    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel", "отменить", "cancelar"]
+    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
+        await handle_cancel(message, state, language)
+        return
+    
+    original_time_text = message.text.strip()
+    
+    # Сначала пробуем распарсить как "11 января 16-00 театр в 18-00"
+    # Извлекаем время из строки
+    extracted_time, extracted_text = time_parser.extract_time_and_text(original_time_text, language)
+    
+    if extracted_time and not extracted_text:
+        # В строке только время (без дополнительного текста)
+        time_to_parse = extracted_time
+    elif extracted_time and extracted_text:
+        # В строке и время, и текст - сохраняем текст для предзаполнения
+        time_to_parse = extracted_time
+        await state.update_data(prefill_text=extracted_text)
+    else:
+        # Не нашли время в привычном формате, пробуем парсить всю строку
+        time_to_parse = original_time_text
+    
+    # Парсим время
+    parsed_time, parse_type, extra_info = time_parser.parse(
+        time_to_parse, language, timezone
+    )
+    
+    if not parsed_time:
+        # Не удалось распознать время
+        error_text = {
+            'ru': f"❌ Не удалось распознать время: '{original_time_text}'\n\n"
+                  "Попробуйте другие форматы:\n"
+                  "• Завтра 15:30\n"
+                  "• 20:00\n"
+                  "• Через 2 часа\n"
+                  "• 11.01.2024 16:00\n\n"
+                  "Или введите /cancel для отмены",
+            'en': f"❌ Could not recognize time: '{original_time_text}'\n\n"
+                  "Try other formats:\n"
+                  "• Tomorrow 3:30 PM\n"
+                  "• 8:00 PM\n"
+                  "• In 2 hours\n"
+                  "• 01/11/2024 4:00 PM\n\n"
+                  "Or enter /cancel to cancel"
+        }
+        
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        return
+    
+    # Проверяем корректность времени
+    is_valid, error_msg = time_parser.validate_time(parsed_time)
+    if not is_valid:
+        error_text = {
+            'ru': f"❌ {error_msg}\n\nВведите другое время или /cancel",
+            'en': f"❌ {error_msg}\n\nEnter another time or /cancel"
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            reply_markup=get_cancel_keyboard(language)
+        )
+        return
+    
+    # Сохраняем время в состоянии
+    await state.update_data(
+        parsed_time=parsed_time.isoformat(),
+        timezone=timezone,
+        parse_type=parse_type
+    )
+    
+    # Показываем пользователю, какое время распознано
+    formatted_time = format_local_time(parsed_time, timezone, language)
+    
+    # Проверяем, есть ли предзаполненный текст
+    user_data = await state.get_data()
+    prefill_text = user_data.get('prefill_text')
+    
+    if prefill_text:
+        # Есть предзаполненный текст - сразу спрашиваем про повторения
+        await ask_for_repeat_type(message, parsed_time, prefill_text, timezone, language)
+        # Очищаем prefill_text чтобы не мешал
+        await state.update_data(prefill_text=None)
+    else:
+        # Нет предзаполненного текста - запрашиваем текст
+        confirm_text = {
+            'ru': f"✅ *Время подтверждено:* {formatted_time}\n\n"
+                  "📝 *Теперь введите текст напоминания:*\n\n"
+                  "Или введите /cancel для отмены",
+            
+            'en': f"✅ *Time confirmed:* {formatted_time}\n\n"
+                  "📝 *Now enter the reminder text:*\n\n"
+                  "Or enter /cancel to cancel"
+        }
+        
+        await message.answer(
+            confirm_text.get(language, confirm_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        
+        await state.set_state(ReminderState.waiting_for_text)
+
+@dp.message(ReminderState.waiting_for_text)
+async def process_reminder_text(message: types.Message, state: FSMContext):
+    """Обработка текста напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru')
+    
+    # Проверяем отмену
+    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel"]
+    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
+        await handle_cancel(message, state, language)
+        return
+    
+    user_data = await state.get_data()
+    
+    # Проверяем, есть ли предзаполненный текст
+    prefill_text = user_data.get('prefill_text')
+    
+    if prefill_text and message.text.strip().lower() in ['да', 'yes', 'ок', 'ok', '✅']:
+        # Пользователь подтвердил использование предзаполненного текста
+        text = prefill_text
+        await state.update_data(prefill_text=None)  # Очищаем
+    else:
+        # Используем введенный текст (или предзаполненный если это не подтверждение)
+        if prefill_text:
+            text = prefill_text
+            await state.update_data(prefill_text=None)
+        else:
+            text = message.text.strip()
+    
+    # Проверяем, пришли ли мы из /quick команды
+    if 'quick_time' in user_data:
+        # Это /quick режим - время уже есть, парсим его
+        timezone = user_data.get('timezone', 'Europe/Moscow')
+        language = user_data.get('language_code', 'ru')
+        time_part = user_data['quick_time']
+        
+        parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
+        
+        if parsed_time:
+            await state.update_data(
+                text=text,
+                parsed_time=parsed_time.isoformat(),
+                quick_time=None  # Удаляем временный ключ
+            )
+            
+            # Переходим к выбору повторения
+            await ask_for_repeat_type(message, parsed_time, text, timezone, language)
+        else:
+            # Ошибка парсинга
+            error_text = {
+                'ru': f"❌ Ошибка: не удалось распознать время '{time_part}'",
+                'en': f"❌ Error: could not recognize time '{time_part}'"
+            }
+            await message.answer(error_text.get(language, error_text['ru']))
+            await state.clear()
+        return
+    
+    # Обычный режим /add или умное создание
+    if not text or len(text) < 2:
+        error_text = {
+            'ru': "❌ Текст напоминания слишком короткий. Введите снова:",
+            'en': "❌ Reminder text is too short. Enter again:"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Проверяем максимальную длину
+    if len(text) > Config.MAX_TEXT_LENGTH:
+        error_text = {
+            'ru': f"❌ Текст слишком длинный (макс. {Config.MAX_TEXT_LENGTH} символов)",
+            'en': f"❌ Text too long (max {Config.MAX_TEXT_LENGTH} characters)"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Сохраняем текст (если еще не сохранен)
+    if 'text' not in user_data:
+        await state.update_data(text=text)
+    
+    # Получаем данные из состояния
+    user_data = await state.get_data()
+    parsed_time_str = user_data.get('parsed_time')
+    timezone = user_data.get('timezone', 'Europe/Moscow')
+    
+    if parsed_time_str:
+        parsed_time = datetime.fromisoformat(parsed_time_str)
+        
+        # Показываем подтверждение и спрашиваем про повторения
+        await ask_for_repeat_type(message, parsed_time, text, timezone, language)
+    else:
+        # Нет времени в состоянии - ошибка
+        error_text = {
+            'ru': "❌ Ошибка: время не найдено. Начните заново с /add",
+            'en': "❌ Error: time not found. Start over with /add"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        await state.clear()
+
+# ===== ОБРАБОТКА КНОПКИ НАСТРОЕК =====
+
+@dp.message(F.text.in_(["⚙️ Настройки", "⚙️ Settings"]))
+async def cmd_settings_button(message: types.Message):
+    """Обработка кнопки настроек"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    settings_text = {
+        'ru': "⚙️ *Настройки*\n\n"
+              "Выберите опцию:\n"
+              "/language - Сменить язык\n"
+              "/timezone - Установить часовой пояс\n"
+              "/stats - Статистика\n\n"
+              "Текущие настройки:\n"
+              f"🌐 Язык: {'Русский' if language == 'ru' else 'English'}\n"
+              f"🕒 Часовой пояс: {user.get('timezone', 'Europe/Moscow')}",
+        'en': "⚙️ *Settings*\n\n"
+              "Choose an option:\n"
+              "/language - Change language\n"
+              "/timezone - Set timezone\n"
+              "/stats - Statistics\n\n"
+              "Current settings:\n"
+              f"🌐 Language: {'Russian' if language == 'ru' else 'English'}\n"
+              f"🕒 Timezone: {user.get('timezone', 'Europe/Moscow')}"
+    }
+    
+    await message.answer(
+        settings_text.get(language, settings_text['en']),
+        parse_mode="Markdown"
+    )
+
+# ===== НОВАЯ ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЙ (время → текст → повторение) =====
+
+# ===== УМНОЕ СОЗДАНИЕ НАПОМИНАНИЙ (без команд) =====
+
+# ===== УМНОЕ СОЗДАНИЕ НАПОМИНАНИЙ (без команд) =====
+
+@dp.message()
+async def handle_all_messages(message: types.Message, state: FSMContext):
+    """Обработка всех сообщений с правильным порядком"""
+    # Сначала проверяем, не команда ли это
+    if message.text and message.text.startswith('/'):
+        return  # Команды обработаются другими хендлерами
+    
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        return  # Пользователь не зарегистрирован
+    
+    # Проверяем, не в состоянии ли мы уже
+    current_state = await state.get_state()
+    if current_state:
+        return  # Уже в процессе - пропускаем
+    
+    language = user.get('language_code', 'ru')
+    
+    # Проверяем, не кнопка ли это главного меню
+    menu_buttons_ru = [
+        "➕ Добавить напоминание",
+        "📋 Мои напоминания",
+        "📅 На сегодня",
+        "📆 На завтра",
+        "⚙️ Настройки",
+        "❓ Помощь",
+        "❌ Отмена"
+    ]
+    
+    menu_buttons_en = [
+        "➕ Add reminder",
+        "📋 My reminders",
+        "📅 For today",
+        "📆 For tomorrow",
+        "⚙️ Settings",
+        "❓ Help",
+        "❌ Cancel"
+    ]
+    
+    all_menu_buttons = menu_buttons_ru + menu_buttons_en
+    
+    if message.text in all_menu_buttons:
+        return  # Это кнопка - пропускаем, ее обработают другие хендлеры
+    
+    # Теперь проверяем, не хочет ли пользователь создать напоминание
+    text = message.text.strip()
+    
+    if len(text) < 3:
+        return  # Слишком короткое сообщение
+    
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Пробуем распознать время в сообщении
+    time_part, text_part = time_parser.extract_time_and_text(text, language)
+    
+    if not time_part:
+        # Не нашли время - возможно пользователь просто написал текст
+        # Спрашиваем, хочет ли он создать напоминание
+        ask_text = {
+            'ru': f"📝 *'{text[:50]}...'*\n\n"
+                  "Хотите создать напоминание с этим текстом?\n"
+                  "Введите время для напоминания или /cancel",
+            'en': f"📝 *'{text[:50]}...'*\n\n"
+                  "Do you want to create a reminder with this text?\n"
+                  "Enter time for reminder or /cancel"
+        }
+        
+        await state.update_data(
+            prefill_text=text,
+            timezone=timezone,
+            language_code=language
+        )
+        
+        await message.answer(
+            ask_text.get(language, ask_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        
+        await state.set_state(ReminderState.waiting_for_time)
+        return
+    
+    # Нашли время в сообщении
+    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
+    
+    if not parsed_time:
+        # Не удалось распознать время
+        return
+    
+    if text_part:
+        # Есть и время, и текст - показываем подтверждение
+        await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
+        
+        # Сохраняем в состоянии
+        await state.update_data(
+            parsed_time=parsed_time.isoformat(),
+            timezone=timezone,
+            text=text_part
+        )
+    else:
+        # Есть только время - запрашиваем текст
+        formatted_time = format_local_time(parsed_time, timezone, language)
+        
+        request_text = {
+            'ru': f"🕐 *Время распознано:* {formatted_time}\n\n"
+                  "📝 *Введите текст напоминания:*",
+            'en': f"🕐 *Time recognized:* {formatted_time}\n\n"
+                  "📝 *Enter reminder text:*"
+        }
+        
+        await state.update_data(
+            parsed_time=parsed_time.isoformat(),
+            timezone=timezone,
+            parse_type=parse_type
+        )
+        
+        await message.answer(
+            request_text.get(language, request_text['ru']),
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard(language)
+        )
+        
+        await state.set_state(ReminderState.waiting_for_text)
+
+
+
+
+
+
+async def ask_for_repeat_type(message: types.Message, parsed_time: datetime, 
+                             text: str, timezone: str, language: str):
+    """Спросить тип повторения"""
+    formatted_time = format_local_time(parsed_time, timezone, language)
+    
+    confirm_text = {
+        'ru': f"📝 *Текст:* {text}\n"
+              f"⏰ *Время:* {formatted_time}\n\n"
+              "Это повторяющееся напоминание?",
+        'en': f"📝 *Text:* {text}\n"
+              f"⏰ *Time:* {formatted_time}\n\n"
+              "Is this a repeating reminder?"
+    }
+    
+    builder = InlineKeyboardBuilder()
+    
+    if language == 'ru':
+        builder.row(
+            InlineKeyboardButton(text="✅ Разовое", callback_data="repeat_once"),
+            InlineKeyboardButton(text="🔄 Ежедневное", callback_data="repeat_daily"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📅 Еженедельное", callback_data="repeat_weekly"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="repeat_cancel")
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="✅ One-time", callback_data="repeat_once"),
+            InlineKeyboardButton(text="🔄 Daily", callback_data="repeat_daily"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📅 Weekly", callback_data="repeat_weekly"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data="repeat_cancel")
+        )
+    
+    await message.answer(
+        confirm_text.get(language, confirm_text['ru']),
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+
+# ===== ОБРАБОТКА CALLBACK'ОВ ДЛЯ ПОВТОРЕНИЙ =====
+
+@dp.callback_query(F.data.startswith("repeat_"))
+async def handle_repeat_type(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора типа повторения"""
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru')
+    
+    if callback.data == "repeat_cancel":
+        # Отмена
+        await state.clear()
+        cancel_text = {
+            'ru': "❌ Создание напоминания отменено",
+            'en': "❌ Reminder creation cancelled"
+        }
+        await callback.message.edit_text(
+            cancel_text.get(language, cancel_text['ru'])
+        )
+        await callback.message.answer(
+            "Меню:" if language == 'ru' else "Menu:",
+            reply_markup=get_main_keyboard(language)
+        )
+        await callback.answer()
+        return
+    
+    # Получаем данные из состояния
+    user_data = await state.get_data()
+    text = user_data.get('text', '')
+    parsed_time_str = user_data.get('parsed_time')
+    timezone = user_data.get('timezone', 'Europe/Moscow')
+    
+    if not parsed_time_str:
+        await callback.answer("Ошибка: время не найдено", show_alert=True)
+        return
+    
+    parsed_time = datetime.fromisoformat(parsed_time_str)
+    
+    # Определяем тип повторения
+    repeat_type = callback.data.replace("repeat_", "")
+    
+    if repeat_type == "once":
+        # Разовое напоминание - сразу создаем
+        await create_reminder(
+            user_id, text, parsed_time, timezone,
+            repeat_type='once', repeat_days=None,
+            callback=callback, language=language
+        )
+        await state.clear()
+        
+    elif repeat_type == "daily":
+        # Ежедневное - сразу создаем
+        await create_reminder(
+            user_id, text, parsed_time, timezone,
+            repeat_type='daily', repeat_days=None,
+            callback=callback, language=language
+        )
+        await state.clear()
+        
+    elif repeat_type == "weekly":
+        # Еженедельное - нужно выбрать дни недели
+        await ask_for_weekdays(callback.message, language, state)
+        await callback.answer()
+
+async def ask_for_weekdays(message: types.Message, language: str, state: FSMContext):
+    """Запросить выбор дней недели для еженедельного напоминания"""
+    weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    
+    weekdays = weekdays_ru if language == 'ru' else weekdays_en
+    
+    builder = InlineKeyboardBuilder()
+    
+    # Дни недели (пока не выбраны)
+    for i, day in enumerate(weekdays):
+        builder.add(InlineKeyboardButton(
+            text=f"□ {day}", 
+            callback_data=f"weekly_day_{i}"
+        ))
+    
+    builder.adjust(4, 3)
+    
+    # Кнопки действий
+    action_row = []
+    if language == 'ru':
+        action_row.extend([
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data="weekly_confirm"),
+            InlineKeyboardButton(text="📅 Все дни", callback_data="weekly_all"),
+            InlineKeyboardButton(text="📅 Будни", callback_data="weekly_workdays"),
+        ])
+    else:
+        action_row.extend([
+            InlineKeyboardButton(text="✅ Confirm", callback_data="weekly_confirm"),
+            InlineKeyboardButton(text="📅 All days", callback_data="weekly_all"),
+            InlineKeyboardButton(text="📅 Weekdays", callback_data="weekly_workdays"),
+        ])
+    
+    builder.row(*action_row)
+    
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отмена" if language == 'ru' else "❌ Cancel",
+            callback_data="weekly_cancel"
+        )
+    )
+    
+    question_text = {
+        'ru': "📅 *Выберите дни недели для повторения:*\n\n"
+              "Нажмите на день, чтобы выбрать/отменить.",
+        'en': "📅 *Select weekdays for repetition:*\n\n"
+              "Click on a day to select/deselect."
+    }
+    
+    await message.answer(
+        question_text.get(language, question_text['ru']),
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.callback_query(F.data.startswith("weekly_"))
+async def handle_weekly_selection(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора дней недели"""
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru')
+    
+    data = callback.data
+    
+    if data == "weekly_cancel":
+        # Отмена
+        await state.clear()
+        cancel_text = {
+            'ru': "❌ Создание напоминания отменено",
+            'en': "❌ Reminder creation cancelled"
+        }
+        await callback.message.edit_text(
+            cancel_text.get(language, cancel_text['ru'])
+        )
+        await callback.message.answer(
+            "Меню:" if language == 'ru' else "Menu:",
+            reply_markup=get_main_keyboard(language)
+        )
+        await callback.answer()
+        return
+    
+    # Получаем текущий выбор из состояния
+    user_data = await state.get_data()
+    selected_days = user_data.get('weekly_days', [])
+    
+    if data.startswith("weekly_day_"):
+        # Выбор/отмена дня
+        day_index = int(data.split("_")[2])
+        
+        if day_index in selected_days:
+            selected_days.remove(day_index)
+        else:
+            selected_days.append(day_index)
+        
+        selected_days.sort()
+        await state.update_data(weekly_days=selected_days)
+        
+        # Обновляем клавиатуру
+        await update_weekly_keyboard(callback.message, selected_days, language)
+        await callback.answer()
+        
+    elif data == "weekly_all":
+        # Выбрать все дни
+        selected_days = list(range(7))
+        await state.update_data(weekly_days=selected_days)
+        await update_weekly_keyboard(callback.message, selected_days, language)
+        await callback.answer("Все дни выбраны")
+        
+    elif data == "weekly_workdays":
+        # Выбрать будни (пн-пт)
+        selected_days = list(range(5))  # 0-4 = Пн-Пт
+        await state.update_data(weekly_days=selected_days)
+        await update_weekly_keyboard(callback.message, selected_days, language)
+        await callback.answer("Будни выбраны" if language == 'ru' else "Weekdays selected")
+        
+    elif data == "weekly_confirm":
+        # Подтверждение выбора дней
+        if not selected_days:
+            error_text = {
+                'ru': "❌ Нужно выбрать хотя бы один день недели!",
+                'en': "❌ Need to select at least one weekday!"
+            }
+            await callback.answer(
+                error_text.get(language, error_text['ru']),
+                show_alert=True
+            )
+            return
+        
+        # Создаем напоминание
+        user_data = await state.get_data()
+        text = user_data.get('text', '')
+        parsed_time_str = user_data.get('parsed_time')
+        timezone = user_data.get('timezone', 'Europe/Moscow')
+        
+        if not parsed_time_str:
+            await callback.answer("Ошибка: время не найдено", show_alert=True)
+            return
+        
+        parsed_time = datetime.fromisoformat(parsed_time_str)
+        
+        # Преобразуем список дней в строку
+        repeat_days = ",".join(str(day) for day in selected_days)
+        
+        await create_reminder(
+            user_id, text, parsed_time, timezone,
+            repeat_type='weekly', repeat_days=repeat_days,
+            callback=callback, language=language
+        )
+        
+        await state.clear()
+
+async def update_weekly_keyboard(message: types.Message, selected_days: list, language: str):
+    """Обновить клавиатуру выбора дней недели"""
+    weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    
+    weekdays = weekdays_ru if language == 'ru' else weekdays_en
+    
+    builder = InlineKeyboardBuilder()
+    
+    # Обновленные дни недели
+    for i, day in enumerate(weekdays):
+        if i in selected_days:
+            builder.add(InlineKeyboardButton(
+                text=f"✅ {day}", 
+                callback_data=f"weekly_day_{i}"
+            ))
+        else:
+            builder.add(InlineKeyboardButton(
+                text=f"□ {day}", 
+                callback_data=f"weekly_day_{i}"
+            ))
+    
+    builder.adjust(4, 3)
+    
+    # Кнопки действий
+    action_row = []
+    if language == 'ru':
+        action_row.extend([
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data="weekly_confirm"),
+            InlineKeyboardButton(text="📅 Все дни", callback_data="weekly_all"),
+            InlineKeyboardButton(text="📅 Будни", callback_data="weekly_workdays"),
+        ])
+    else:
+        action_row.extend([
+            InlineKeyboardButton(text="✅ Confirm", callback_data="weekly_confirm"),
+            InlineKeyboardButton(text="📅 All days", callback_data="weekly_all"),
+            InlineKeyboardButton(text="📅 Weekdays", callback_data="weekly_workdays"),
+        ])
+    
+    builder.row(*action_row)
+    
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отмена" if language == 'ru' else "❌ Cancel",
+            callback_data="weekly_cancel"
+        )
+    )
+    
+    # Обновляем сообщение
+    question_text = {
+        'ru': f"📅 *Выбрано дней: {len(selected_days)}*\n\n"
+              "Нажмите на день, чтобы выбрать/отменить.",
+        'en': f"📅 *Selected days: {len(selected_days)}*\n\n"
+              "Click on a day to select/deselect."
+    }
+    
+    await message.edit_text(
+        question_text.get(language, question_text['ru']),
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+
+async def create_reminder(user_id: int, text: str, parsed_time: datetime, 
+                         timezone: str, repeat_type: str, repeat_days: str,
+                         callback: types.CallbackQuery, language: str):
+    """Создать напоминание в БД"""
+    try:
+        # ВАЖНО: parsed_time уже в правильном часовом поясе пользователя
+        # Нужно конвертировать в UTC для хранения
+        
+        # Создаем часовой пояс пользователя
+        user_tz = pytz.timezone(timezone)
+        
+        # Делаем время aware (с часовым поясом)
+        if parsed_time.tzinfo is None:
+            # Если время naive, добавляем часовой пояс пользователя
+            parsed_time = user_tz.localize(parsed_time)
+        
+        # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ И СЕКУНДЫ
+        # Приводим к целым минутам
+        parsed_time = parsed_time.replace(second=0, microsecond=0)
+        
+        # Конвертируем в UTC
+        utc_time = parsed_time.astimezone(pytz.UTC)
+        
+        # Отладочная информация
+        logger.info(f"Создание напоминания: пользователь {user_id}")
+        logger.info(f"  Местное время: {parsed_time} ({timezone})")
+        logger.info(f"  UTC время: {utc_time}")
+        
+        # Для тестирования: если время в прошлом, добавляем 1 минуту
+        now_utc = datetime.now(pytz.UTC).replace(second=0, microsecond=0)
+        if utc_time < now_utc and repeat_type == 'once':
+            # Для разовых напоминаний в прошлом - добавляем минуту для теста
+            utc_time = now_utc + timedelta(minutes=1)
+            logger.info(f"  Время в прошлом, смещаем на: {utc_time}")
+        
+        # Добавляем напоминание в БД
+        reminder_id = db.add_reminder(
+            user_id=user_id,
+            text=text,
+            remind_time_utc=utc_time,
+            repeat_type=repeat_type,
+            repeat_days=repeat_days,
+            timezone=timezone
+        )
+        
+        # Форматируем для вывода (в местном времени пользователя)
+        formatted_time = format_local_time(parsed_time, timezone, language)
+        
+        # Текст подтверждения
+        if repeat_type == 'once':
+            repeat_text = {
+                'ru': "✅ Разовое",
+                'en': "✅ One-time"
+            }.get(language, "✅ One-time")
+        elif repeat_type == 'daily':
+            repeat_text = {
+                'ru': "🔄 Ежедневное",
+                'en': "🔄 Daily"
+            }.get(language, "🔄 Daily")
+        elif repeat_type == 'weekly':
+            # Форматируем дни недели
+            days_list = [int(d) for d in repeat_days.split(',')] if repeat_days else []
+            weekdays_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            weekdays = weekdays_ru if language == 'ru' else weekdays_en
+            
+            selected_days = [weekdays[d] for d in days_list]
+            days_str = ", ".join(selected_days)
+            repeat_text = f"📅 Еженедельное ({days_str})" if language == 'ru' else f"📅 Weekly ({days_str})"
+        else:
+            repeat_text = ""
+        
+        success_text = {
+            'ru': f"🎉 *Напоминание создано!*\n\n"
+                  f"📝 *Текст:* {text}\n"
+                  f"⏰ *Время:* {formatted_time}\n"
+                  f"🔄 *Тип:* {repeat_text}\n"
+                  f"🆔 *ID:* {reminder_id}\n\n"
+                  f"Используйте /list для просмотра всех напоминаний.",
+            'en': f"🎉 *Reminder created!*\n\n"
+                  f"📝 *Text:* {text}\n"
+                  f"⏰ *Time:* {formatted_time}\n"
+                  f"🔄 *Type:* {repeat_text}\n"
+                  f"🆔 *ID:* {reminder_id}\n\n"
+                  f"Use /list to view all reminders."
+        }
+        
+        await callback.message.edit_text(
+            success_text.get(language, success_text['en']),
+            parse_mode="Markdown"
+        )
+        
+        await callback.message.answer(
+            "Меню:" if language == 'ru' else "Menu:",
+            reply_markup=get_main_keyboard(language)
+        )
+        
+        await callback.answer()
+        
+        # Логируем создание
+        logger.info(f"Reminder {reminder_id} created for user {user_id}")
+        
+    except Exception as e:
+        error_text = {
+            'ru': f"❌ Ошибка при создании напоминания: {str(e)}",
+            'en': f"❌ Error creating reminder: {str(e)}"
+        }
+        
+        await callback.message.edit_text(
+            error_text.get(language, error_text['ru'])
+        )
+        
+        logger.error(f"Failed to create reminder for user {user_id}: {e}", exc_info=True)
 
 # ===== ПЛАНИРОВЩИК =====
 
