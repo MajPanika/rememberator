@@ -558,9 +558,11 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
         await handle_cancel(message, state, language)
         return
     
+    original_time_text = message.text.strip()  # Сохраняем оригинальный текст времени
+    
     # Парсим время
     parsed_time, parse_type, extra_info = time_parser.parse(
-        message.text, language, timezone
+        original_time_text, language, timezone
     )
     
     if not parsed_time:
@@ -588,11 +590,12 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
         await message.answer(error_text.get(language, error_text['ru']))
         return
     
-    # Сохраняем время в состоянии
+    # Сохраняем время в состоянии (и оригинальный текст)
     await state.update_data(
         parsed_time=parsed_time.isoformat(),
         timezone=timezone,
-        parse_type=parse_type
+        parse_type=parse_type,
+        original_time_text=original_time_text  # ✅ СОХРАНЯЕМ ОРИГИНАЛЬНЫЙ ТЕКСТ
     )
     
     # Показываем пользователю, какое время распознано
@@ -604,21 +607,27 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
               "Примеры:\n"
               "• Позвонить маме\n"
               "• Сходить в музей в 17:30\n"
-              "• Встреча с клиентом",
+              "• Встреча с клиентом\n\n"
+              f"Или просто ответьте на это сообщение с текстом.",
         
         'en': f"✅ *Time confirmed:* {formatted_time}\n\n"
               "📝 *Now enter the reminder text:*\n\n"
               "Examples:\n"
               "• Call mom\n"
               "• Go to the museum at 5:30 PM\n"
-              "• Meeting with client"
+              "• Meeting with client\n\n"
+              f"Or just reply to this message with text."
     }
     
-    await message.answer(
+    # Отправляем сообщение с просьбой ввести текст
+    msg = await message.answer(
         confirm_text.get(language, confirm_text['ru']),
         parse_mode="Markdown",
         reply_markup=get_cancel_keyboard(language)
     )
+    
+    # Сохраняем ID сообщения для удобства
+    await state.update_data(last_message_id=msg.message_id)
     
     await state.set_state(ReminderState.waiting_for_text)
 
