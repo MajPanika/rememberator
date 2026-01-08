@@ -580,59 +580,84 @@ class TimeParser:
     
     def extract_time_and_text(self, full_text: str, language: str = 'ru') -> Tuple[str, str]:
         """
-        Извлечь время и текст из полной строки (альтернативный метод).
-        Ищет время в начале или конце строки.
+        Извлечь время и текст из полной строки.
+        Ищет время в любом месте строки.
+        Возвращает (time_part, text_part)
         """
         if not full_text:
             return "", ""
         
         full_text = full_text.strip()
         
-        # Пробуем найти время в начале строки
+        # Список паттернов для поиска времени
+        time_patterns = []
+        
         if language == 'ru':
             time_patterns = [
-                r'^(\d{1,2}[:\.]\d{2}\s*(?:утра|вечера|ночи|дня)?\s+)(.*)',
-                r'^(\d{1,2}\s+(?:утра|вечера|ночи|дня)\s+)(.*)',
-                r'^(завтра\s+\d+.*?\s+)(.*)',
-                r'^(сегодня\s+\d+.*?\s+)(.*)',
-                r'^(послезавтра\s+\d+.*?\s+)(.*)',
+                # Полные форматы с датами
+                r'(\d{1,2}[\.\/]\d{1,2}(?:[\.\/]\d{2,4})?(?:\s+(?:в\s+)?)?\d+.*?)(?:\s|$|\.|,)',
+                # Относительное время
+                r'(через\s+\d+\s+(?:час|минут|день).*?)(?:\s|$|\.|,)',
+                # Дни недели
+                r'((?:понедельник|вторник|сред[ау]|четверг|пятниц[ау]|суббот[ау]|воскресенье)(?:\s+(?:в\s+)?)?\d+.*?)(?:\s|$|\.|,)',
+                # Завтра/сегодня/послезавтра
+                r'((?:завтра|послезавтра|сегодня)(?:\s+(?:в\s+)?)?\d+.*?)(?:\s|$|\.|,)',
+                # Время с тире или точкой
+                r'(\d{1,2}[-\.]\d{2}\s*(?:утра|вечера|ночи|дня)?)(?:\s|$|\.|,)',
+                # Обычное время
+                r'(\d{1,2}[:\.]\d{2}\s*(?:утра|вечера|ночи|дня)?)(?:\s|$|\.|,)',
+                # Время без минут
+                r'(\d{1,2}\s+(?:утра|вечера|ночи|дня))(?:\s|$|\.|,)',
             ]
         else:
             time_patterns = [
-                r'^(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\s+)(.*)',
-                r'^(\d{1,2}\s*(?:AM|PM|am|pm)\s+)(.*)',
-                r'^(tomorrow\s+\d+.*?\s+)(.*)',
-                r'^(today\s+\d+.*?\s+)(.*)',
-                r'^(day after tomorrow\s+\d+.*?\s+)(.*)',
+                r'(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?(?:\s+(?:at\s+)?)?\d+.*?)(?:\s|$|\.|,)',
+                r'(in\s+\d+\s+(?:hour|minute|day).*?)(?:\s|$|\.|,)',
+                r'((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+(?:at\s+)?)?\d+.*?)(?:\s|$|\.|,)',
+                r'((?:tomorrow|day after tomorrow|today)(?:\s+(?:at\s+)?)?\d+.*?)(?:\s|$|\.|,)',
+                r'(\d{1,2}[-\.]\d{2}\s*(?:AM|PM|am|pm)?)(?:\s|$|\.|,)',
+                r'(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)(?:\s|$|\.|,)',
+                r'(\d{1,2}\s*(?:AM|PM|am|pm))(?:\s|$|\.|,)',
             ]
+        
+        # Ищем самый длинный match (самый специфичный)
+        best_match = None
+        best_pattern = ""
         
         for pattern in time_patterns:
-            match = re.match(pattern, full_text, re.IGNORECASE)
-            if match:
-                time_part = match.group(1).strip()
-                text_part = match.group(2).strip()
-                return time_part, text_part
+            matches = list(re.finditer(pattern, full_text, re.IGNORECASE))
+            for match in matches:
+                time_candidate = match.group(1).strip()
+                # Проверяем, что это действительно похоже на время
+                if len(time_candidate) > 2 and any(c.isdigit() for c in time_candidate):
+                    if not best_match or len(time_candidate) > len(best_match.group(1)):
+                        best_match = match
+                        best_pattern = pattern
         
-        # Если время не в начале, возможно оно в конце
-        if language == 'ru':
-            time_patterns_end = [
-                r'(.*\s)(\d{1,2}[:\.]\d{2}\s*(?:утра|вечера|ночи|дня)?)$',
-                r'(.*\s)(\d{1,2}\s+(?:утра|вечера|ночи|дня))$',
-            ]
-        else:
-            time_patterns_end = [
-                r'(.*\s)(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)$',
-                r'(.*\s)(\d{1,2}\s*(?:AM|PM|am|pm))$',
-            ]
+        if best_match:
+            time_part = best_match.group(1).strip()
+            
+            # Получаем текст до и после времени
+            before = full_text[:best_match.start(1)].strip()
+            after = full_text[best_match.end(1):].strip()
+            
+            # Объединяем текст, убирая лишние разделители
+            text_parts = []
+            if before:
+                text_parts.append(before)
+            if after:
+                text_parts.append(after)
+            
+            text_part = " ".join(text_parts).strip()
+            
+            # Чистим время от лишних слов
+            if language == 'ru':
+                time_part = re.sub(r'^(?:в\s+|на\s+)', '', time_part)
+            else:
+                time_part = re.sub(r'^(?:at\s+|on\s+)', '', time_part)
+            
+            return time_part, text_part
         
-        for pattern in time_patterns_end:
-            match = re.search(pattern, full_text, re.IGNORECASE)
-            if match:
-                text_part = match.group(1).strip()
-                time_part = match.group(2).strip()
-                return time_part, text_part
-        
-        # Если не нашли - возвращаем весь текст как текст, время пустое
         return "", full_text
     
     # Остальные методы (detect_repeat_pattern, validate_time, get_examples, clear_cache)
