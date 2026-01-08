@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Reminder Pro Bot - Умная напоминалка с поддержкой timezone
+НОВАЯ ЛОГИКА: время → текст → повторение
 """
 
 import asyncio
@@ -47,7 +48,7 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 db = Database(Config.DB_NAME)
 time_parser = TimeParser()
 
-# Состояния FSM
+# ===== НОВЫЕ СОСТОЯНИЯ FSM (время → текст → повторение) =====
 class ReminderState(StatesGroup):
     waiting_for_time = State()    # Ждем время напоминания
     waiting_for_text = State()    # Ждем текст напоминания  
@@ -85,7 +86,7 @@ def format_local_time(dt: datetime, timezone: str, language: str) -> str:
         logger.error(f"Error formatting time: {e}")
         # Фолбэк
         return dt.strftime("%Y-%m-%d %H:%M")
-        
+
 async def send_reminder_notification(reminder: dict):
     """Отправить уведомление о напоминании"""
     try:
@@ -185,261 +186,19 @@ async def check_and_send_reminders():
     except Exception as e:
         logger.error(f"💥 КРИТИЧЕСКАЯ ОШИБКА в check_and_send_reminders: {e}", exc_info=True)
 
-# ===== ОСНОВНЫЕ КОМАНДЫ =====
-
-@dp.message(Command("quick"))
-async def cmd_quick(message: types.Message, state: FSMContext):
-    """Быстрое создание напоминания в формате "время текст" """
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Получаем текст команды без "/quick"
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        help_text = {
-            'ru': "⚡ *Быстрое создание напоминания*\n\n"
-                  "Формат:\n`/quick завтра 15:30 сходить в музей`\n\n"
-                  "Или:\n`/quick через 2 часа позвонить маме`",
-            'en': "⚡ *Quick reminder creation*\n\n"
-                  "Format:\n`/quick tomorrow 3:30 PM go to museum`\n\n"
-                  "Or:\n`/quick in 2 hours call mom`"
-        }
-        await message.answer(help_text.get(language, help_text['ru']), parse_mode="Markdown")
-        return
-    
-    full_text = args[1]
-    
-    # Пробуем разделить на время и текст
-    time_part, text_part = time_parser.extract_time_and_text(full_text, language)
-    
-    if not time_part:
-        # Не нашли время - просим указать отдельно
-        error_text = {
-            'ru': "❌ Не удалось найти время в вашем сообщении.\n\n"
-                  "Попробуйте:\n`/quick завтра 15:30 текст`\n\n"
-                  "Или используйте обычный режим: /add",
-            'en': "❌ Could not find time in your message.\n\n"
-                  "Try:\n`/quick tomorrow 3:30 PM text`\n\n"
-                  "Or use regular mode: /add"
-        }
-        await message.answer(error_text.get(language, error_text['ru']), parse_mode="Markdown")
-        return
-    
-    if not text_part:
-        # Нашли время, но нет текста
-        text_request = {
-            'ru': f"🕐 *Время распознано:* {time_part}\n\n"
-                  "📝 *Введите текст напоминания:*",
-            'en': f"🕐 *Time recognized:* {time_part}\n\n"
-                  "📝 *Enter reminder text:*"
-        }
-        
-        await state.update_data(quick_time=time_part)
-        await state.set_state(ReminderState.waiting_for_text)
-        await message.answer(text_request.get(language, text_request['ru']), parse_mode="Markdown")
-        return
-    
-    # Есть и время, и текст - парсим время
-    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
-    
-    if not parsed_time:
-        error_text = {
-            'ru': f"❌ Не удалось распознать время: '{time_part}'",
-            'en': f"❌ Could not recognize time: '{time_part}'"
-        }
-        await message.answer(error_text.get(language, error_text['ru']))
-        return
-    
-    # Показываем подтверждение и спрашиваем про повторения
-    await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
-    
-    # Сохраняем в состоянии
-    await state.update_data(
-        parsed_time=parsed_time.isoformat(),
-        timezone=timezone,
-        text=text_part
-    )
-
-@dp.message(Command("fix_reminders"))
-async def cmd_fix_reminders(message: types.Message):
-    """Исправить времена напоминаний в БД"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    await message.answer("🔧 Исправляю времена напоминаний...")
-    
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Получаем все напоминания пользователя
-        cursor.execute('SELECT id, next_remind_time_utc FROM reminders WHERE user_id = ?', (user_id,))
-        reminders = cursor.fetchall()
-        
-        fixed_count = 0
-        for reminder in reminders:
-            old_time = reminder['next_remind_time_utc']
-            if old_time and '+' in old_time:  # Если есть часовой пояс
-                # Обрезаем часовой пояс и миллисекунды
-                try:
-                    # Парсим время
-                    dt = datetime.fromisoformat(old_time.replace('Z', '+00:00'))
-                    # Обрезаем миллисекунды
-                    dt = dt.replace(microsecond=0)
-                    # Сохраняем без часового пояса
-                    new_time = dt.strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    # Обновляем в БД
-                    cursor.execute('''
-                        UPDATE reminders 
-                        SET next_remind_time_utc = ?
-                        WHERE id = ?
-                    ''', (new_time, reminder['id']))
-                    
-                    fixed_count += 1
-                    logger.info(f"Исправлено время напоминания {reminder['id']}: {old_time} -> {new_time}")
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка исправления времени {reminder['id']}: {e}")
-        
-        conn.commit()
-    
-    response = {
-        'ru': f"✅ Исправлено {fixed_count} напоминаний.",
-        'en': f"✅ Fixed {fixed_count} reminders."
+async def handle_cancel(message: types.Message, state: FSMContext, language: str):
+    """Обработка отмены создания напоминания"""
+    await state.clear()
+    cancel_text = {
+        'ru': "❌ Создание напоминания отменено",
+        'en': "❌ Reminder creation cancelled"
     }
-    
-    await message.answer(response.get(language, response['ru']))
-
-@dp.message(Command("force_send"))
-async def cmd_force_send(message: types.Message):
-    """Принудительно отправить все просроченные напоминания"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    # Получаем все активные напоминания пользователя
-    reminders = db.get_user_reminders(user_id, active_only=True)
-    
-    if not reminders:
-        response = {
-            'ru': "📭 У вас нет активных напоминаний.",
-            'en': "📭 You have no active reminders."
-        }
-        await message.answer(response.get(language, response['ru']))
-        return
-    
-    await message.answer("🔄 Ищу просроченные напоминания...")
-    
-    sent_count = 0
-    now_utc = datetime.now(pytz.UTC)
-    
-    for reminder in reminders:
-        # Проверяем, просрочено ли напоминание
-        remind_time = reminder['next_remind_time_utc']
-        if isinstance(remind_time, str):
-            try:
-                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
-                remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
-            except:
-                continue
-        
-        # Если напоминание просрочено
-        if remind_time <= now_utc:
-            try:
-                await send_reminder_notification(reminder)
-                sent_count += 1
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Ошибка отправки напоминания {reminder['id']}: {e}")
-    
-    response = {
-        'ru': f"✅ Отправлено {sent_count} просроченных напоминаний.",
-        'en': f"✅ Sent {sent_count} overdue reminders."
-    }
-    
-    await message.answer(response.get(language, response['ru']))
-
-@dp.message(Command("check_now"))
-async def cmd_check_now(message: types.Message):
-    """Немедленно проверить и отправить напоминания"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    await message.answer("🔍 Проверяю напоминания...")
-    
-    # Немедленно запускаем проверку
-    await check_and_send_reminders()
-    
-    response = {
-        'ru': "✅ Проверка завершена. Смотрите логи бота.",
-        'en': "✅ Check completed. See bot logs."
-    }
-    
-    await message.answer(response.get(language, response['en']))
-
-@dp.message(Command("test_time"))
-async def cmd_test_time(message: types.Message):
-    """Тестовая команда для проверки времени"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Текущее время в разных часовых поясах
-    now_utc = datetime.now(pytz.UTC)
-    user_tz = pytz.timezone(timezone)
-    now_local = now_utc.astimezone(user_tz)
-    
-    test_text = {
-        'ru': f"⏰ *Тест времени*\n\n"
-              f"🕐 Текущее время UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
-              f"🏠 Ваше местное время ({timezone}): {now_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-              f"*Примеры:*\n"
-              f"• 'через 5 минут' - напоминание через 5 минут\n"
-              f"• '18:30' - сегодня в 18:30\n"
-              f"• 'завтра 10:00' - завтра в 10:00",
-        'en': f"⏰ *Time Test*\n\n"
-              f"🕐 Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
-              f"🏠 Your local time ({timezone}): {now_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-              f"*Examples:*\n"
-              f"• 'in 5 minutes' - reminder in 5 minutes\n"
-              f"• '18:30' - today at 18:30\n"
-              f"• 'tomorrow 10:00' - tomorrow at 10:00"
-    }
-    
     await message.answer(
-        test_text.get(language, test_text['en']),
-        parse_mode="Markdown"
+        cancel_text.get(language, cancel_text['ru']),
+        reply_markup=get_main_keyboard(language)
     )
+
+# ===== ОСНОВНЫЕ КОМАНДЫ =====
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -548,7 +307,8 @@ async def cmd_help(message: types.Message):
 *Основные:*
 /start - Начать работу
 /help - Эта справка
-/add - Добавить напоминание
+/add - Добавить напоминание (сначала время, потом текст)
+/quick - Быстрое добавление (время и текст в одном сообщении)
 /list - Мои напоминания
 /today - Напоминания на сегодня
 /tomorrow - На завтра
@@ -558,15 +318,17 @@ async def cmd_help(message: types.Message):
 /pause <id> - Пауза напоминания
 /resume <id> - Возобновить
 /delete <id> - Удалить
-/pause_all - Пауза всех
 /clear - Удалить выполненные
 
 *Настройки:*
 /settings - Настройки
 /language - Сменить язык
 /timezone - Установить часовой пояс
-/export - Экспорт напоминаний
 /stats - Статистика
+
+⚡ *Быстрое создание:*
+`/quick завтра 15:30 сходить в музей`
+`/quick через 2 часа позвонить маме`
 
 📝 *Формат времени:*
 • *Завтра 10:30* - завтра в 10:30
@@ -588,7 +350,8 @@ async def cmd_help(message: types.Message):
 *Basic:*
 /start - Start bot
 /help - This help
-/add - Add reminder
+/add - Add reminder (time first, then text)
+/quick - Quick add (time and text in one message)
 /list - My reminders
 /today - For today
 /tomorrow - For tomorrow
@@ -598,15 +361,17 @@ async def cmd_help(message: types.Message):
 /pause <id> - Pause reminder
 /resume <id> - Resume
 /delete <id> - Delete
-/pause_all - Pause all
 /clear - Delete completed
 
 *Settings:*
 /settings - Settings
 /language - Change language
 /timezone - Set timezone
-/export - Export reminders
 /stats - Statistics
+
+⚡ *Quick creation:*
+`/quick tomorrow 3:30 PM go to museum`
+`/quick in 2 hours call mom`
 
 📝 *Time formats:*
 • *Tomorrow 10:30* - tomorrow at 10:30
@@ -628,437 +393,7 @@ async def cmd_help(message: types.Message):
         parse_mode="Markdown"
     )
 
-# ===== УДАЛЕНИЕ НАПОМИНАНИЙ =====
-
-@dp.message(Command("delete"))
-async def cmd_delete(message: types.Message):
-    """Удалить напоминание по ID"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    # Получаем аргумент (ID напоминания)
-    args = message.text.split()
-    if len(args) < 2:
-        error_text = {
-            'ru': "❌ *Использование:* /delete <ID_напоминания>\n\n"
-                  "Пример:\n`/delete 5`\n\n"
-                  "Используйте /list чтобы увидеть ID ваших напоминаний.",
-            'en': "❌ *Usage:* /delete <reminder_id>\n\n"
-                  "Example:\n`/delete 5`\n\n"
-                  "Use /list to see your reminder IDs."
-        }
-        await message.answer(
-            error_text.get(language, error_text['ru']),
-            parse_mode="Markdown"
-        )
-        return
-    
-    try:
-        reminder_id = int(args[1])
-    except ValueError:
-        error_text = {
-            'ru': "❌ ID должен быть числом!",
-            'en': "❌ ID must be a number!"
-        }
-        await message.answer(error_text.get(language, error_text['ru']))
-        return
-    
-    # Пробуем удалить
-    success = db.delete_reminder(reminder_id, user_id)
-    
-    if success:
-        success_text = {
-            'ru': f"✅ Напоминание *{reminder_id}* удалено!",
-            'en': f"✅ Reminder *{reminder_id}* deleted!"
-        }
-        await message.answer(
-            success_text.get(language, success_text['ru']),
-            parse_mode="Markdown"
-        )
-    else:
-        error_text = {
-            'ru': f"❌ Не удалось удалить напоминание *{reminder_id}*.\n"
-                  "Проверьте ID или убедитесь, что напоминание принадлежит вам.",
-            'en': f"❌ Failed to delete reminder *{reminder_id}*.\n"
-                  "Check the ID or make sure the reminder belongs to you."
-        }
-        await message.answer(
-            error_text.get(language, error_text['ru']),
-            parse_mode="Markdown"
-        )
-
-# Добавим также команду для удаления всех выполненных
-@dp.message(Command("clear"))
-async def cmd_clear(message: types.Message):
-    """Удалить все выполненные напоминания"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    
-    # Получаем все напоминания пользователя
-    all_reminders = db.get_user_reminders(user_id, active_only=False)
-    
-    if not all_reminders:
-        empty_text = {
-            'ru': "📭 У вас нет напоминаний.",
-            'en': "📭 You have no reminders."
-        }
-        await message.answer(empty_text.get(language, empty_text['ru']))
-        return
-    
-    # Считаем неактивные (выполненные)
-    inactive_reminders = [r for r in all_reminders if not r['is_active']]
-    
-    if not inactive_reminders:
-        no_inactive_text = {
-            'ru': "✅ У вас нет выполненных напоминаний для удаления.",
-            'en': "✅ You have no completed reminders to delete."
-        }
-        await message.answer(no_inactive_text.get(language, no_inactive_text['ru']))
-        return
-    
-    # Удаляем каждое неактивное напоминание
-    deleted_count = 0
-    for reminder in inactive_reminders:
-        if db.delete_reminder(reminder['id'], user_id):
-            deleted_count += 1
-    
-    result_text = {
-        'ru': f"🧹 Удалено {deleted_count} выполненных напоминаний!",
-        'en': f"🧹 Deleted {deleted_count} completed reminders!"
-    }
-    
-    await message.answer(result_text.get(language, result_text['ru']))
-
-# ===== КОМАНДЫ ДЛЯ СЕГОДНЯ/ЗАВТРА =====
-
-@dp.message(Command("today"))
-@dp.message(F.text.in_(["📅 На сегодня", "📅 For today"]))
-async def cmd_today(message: types.Message):
-    """Показать напоминания на сегодня"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Получаем все активные напоминания пользователя
-    reminders = db.get_user_reminders(user_id, active_only=True)
-    
-    if not reminders:
-        empty_text = {
-            'ru': "📭 У вас нет активных напоминаний на сегодня.",
-            'en': "📭 You have no active reminders for today."
-        }
-        await message.answer(empty_text.get(language, empty_text['ru']))
-        return
-    
-    # Текущее время в часовом поясе пользователя
-    user_tz = pytz.timezone(timezone)
-    now_utc = datetime.now(pytz.UTC)
-    now_local = now_utc.astimezone(user_tz)
-    
-    today_reminders = []
-    
-    for reminder in reminders:
-        # Получаем время напоминания
-        remind_time = reminder.get('next_remind_time_utc')
-        if isinstance(remind_time, str):
-            try:
-                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
-                remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
-            except:
-                continue
-        
-        # Конвертируем в локальное время пользователя
-        local_time = remind_time.astimezone(user_tz)
-        
-        # Проверяем, что напоминание сегодня
-        if local_time.date() == now_local.date():
-            today_reminders.append((reminder, local_time))
-    
-    if not today_reminders:
-        empty_text = {
-            'ru': "📅 У вас нет напоминаний на сегодня.",
-            'en': "📅 You have no reminders for today."
-        }
-        await message.answer(empty_text.get(language, empty_text['ru']))
-        return
-    
-    # Сортируем по времени
-    today_reminders.sort(key=lambda x: x[1])
-    
-    # Формируем ответ
-    response_text = {
-        'ru': f"📅 *Напоминания на сегодня ({now_local.strftime('%d.%m.%Y')}):*\n\n",
-        'en': f"📅 *Reminders for today ({now_local.strftime('%B %d, %Y')}):*\n\n"
-    }.get(language, f"📅 Today's reminders:\n\n")
-    
-    for i, (reminder, local_time) in enumerate(today_reminders, 1):
-        # Форматируем время
-        time_str = local_time.strftime('%H:%M')
-        
-        # Тип повторения
-        repeat_type = reminder['repeat_type']
-        if repeat_type == 'once':
-            repeat_symbol = "✅"
-        elif repeat_type == 'daily':
-            repeat_symbol = "🔄"
-        elif repeat_type == 'weekly':
-            repeat_symbol = "📅"
-        else:
-            repeat_symbol = "📌"
-        
-        response_text += f"{i}. {repeat_symbol} *{time_str}* - {reminder['text']}\n"
-        response_text += f"   🆔 ID: {reminder['id']}\n\n"
-    
-    response_text += {
-        'ru': f"Всего: {len(today_reminders)} напоминаний",
-        'en': f"Total: {len(today_reminders)} reminders"
-    }.get(language, f"Total: {len(today_reminders)}")
-    
-    await message.answer(response_text, parse_mode="Markdown")
-
-@dp.message(Command("tomorrow"))
-@dp.message(F.text.in_(["📆 На завтра", "📆 For tomorrow"]))
-async def cmd_tomorrow(message: types.Message):
-    """Показать напоминания на завтра"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Получаем все активные напоминания пользователя
-    reminders = db.get_user_reminders(user_id, active_only=True)
-    
-    if not reminders:
-        empty_text = {
-            'ru': "📭 У вас нет активных напоминаний на завтра.",
-            'en': "📭 You have no active reminders for tomorrow."
-        }
-        await message.answer(empty_text.get(language, empty_text['ru']))
-        return
-    
-    # Время в часовом поясе пользователя
-    user_tz = pytz.timezone(timezone)
-    now_utc = datetime.now(pytz.UTC)
-    now_local = now_utc.astimezone(user_tz)
-    tomorrow_local = now_local + timedelta(days=1)
-    
-    tomorrow_reminders = []
-    
-    for reminder in reminders:
-        # Получаем время напоминания
-        remind_time = reminder.get('next_remind_time_utc')
-        if isinstance(remind_time, str):
-            try:
-                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
-                remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
-            except:
-                continue
-        
-        # Конвертируем в локальное время пользователя
-        local_time = remind_time.astimezone(user_tz)
-        
-        # Проверяем, что напоминание завтра
-        if local_time.date() == tomorrow_local.date():
-            tomorrow_reminders.append((reminder, local_time))
-    
-    if not tomorrow_reminders:
-        empty_text = {
-            'ru': "📆 У вас нет напоминаний на завтра.",
-            'en': "📆 You have no reminders for tomorrow."
-        }
-        await message.answer(empty_text.get(language, empty_text['ru']))
-        return
-    
-    # Сортируем по времени
-    tomorrow_reminders.sort(key=lambda x: x[1])
-    
-    # Форматируем дату завтра
-    if language == 'ru':
-        months_ru = [
-            'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-            'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'
-        ]
-        date_str = f"{tomorrow_local.day} {months_ru[tomorrow_local.month - 1]} {tomorrow_local.year}"
-    else:
-        date_str = tomorrow_local.strftime("%B %d, %Y")
-    
-    # Формируем ответ
-    response_text = {
-        'ru': f"📆 *Напоминания на завтра ({date_str}):*\n\n",
-        'en': f"📆 *Reminders for tomorrow ({date_str}):*\n\n"
-    }.get(language, f"📆 Tomorrow's reminders:\n\n")
-    
-    for i, (reminder, local_time) in enumerate(tomorrow_reminders, 1):
-        # Форматируем время
-        time_str = local_time.strftime('%H:%M')
-        
-        # Тип повторения
-        repeat_type = reminder['repeat_type']
-        if repeat_type == 'once':
-            repeat_symbol = "✅"
-        elif repeat_type == 'daily':
-            repeat_symbol = "🔄"
-        elif repeat_type == 'weekly':
-            repeat_symbol = "📅"
-        else:
-            repeat_symbol = "📌"
-        
-        response_text += f"{i}. {repeat_symbol} *{time_str}* - {reminder['text']}\n"
-        response_text += f"   🆔 ID: {reminder['id']}\n\n"
-    
-    response_text += {
-        'ru': f"Всего: {len(tomorrow_reminders)} напоминаний",
-        'en': f"Total: {len(tomorrow_reminders)} reminders"
-    }.get(language, f"Total: {len(tomorrow_reminders)}")
-    
-    await message.answer(response_text, parse_mode="Markdown")
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    """Показать статистику пользователя"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await cmd_start(message)
-        return
-    
-    language = user.get('language_code', 'ru')
-    timezone = user.get('timezone', 'Europe/Moscow')
-    
-    # Получаем все напоминания пользователя
-    reminders = db.get_user_reminders(user_id, active_only=False)
-    active_reminders = db.get_user_reminders(user_id, active_only=True)
-    
-    # Считаем статистику
-    total_count = len(reminders)
-    active_count = len(active_reminders)
-    completed_count = total_count - active_count
-    
-    # Считаем по типам
-    once_count = sum(1 for r in active_reminders if r['repeat_type'] == 'once')
-    daily_count = sum(1 for r in active_reminders if r['repeat_type'] == 'daily')
-    weekly_count = sum(1 for r in active_reminders if r['repeat_type'] == 'weekly')
-    
-    # Самые ранние и поздние напоминания
-    if active_reminders:
-        # Преобразуем времена
-        reminder_times = []
-        for reminder in active_reminders:
-            remind_time = reminder.get('next_remind_time_utc')
-            if isinstance(remind_time, str):
-                try:
-                    remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
-                    remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
-                    reminder_times.append((reminder, remind_time))
-                except:
-                    continue
-        
-        if reminder_times:
-            # Сортируем по времени
-            reminder_times.sort(key=lambda x: x[1])
-            earliest = reminder_times[0]
-            latest = reminder_times[-1]
-            
-            # Конвертируем в локальное время
-            user_tz = pytz.timezone(timezone)
-            earliest_local = earliest[1].astimezone(user_tz)
-            latest_local = latest[1].astimezone(user_tz)
-            
-            earliest_time = earliest_local.strftime('%d.%m.%Y %H:%M')
-            latest_time = latest_local.strftime('%d.%m.%Y %H:%M')
-        else:
-            earliest_time = latest_time = "-"
-    else:
-        earliest_time = latest_time = "-"
-    
-    if language == 'ru':
-        stats_text = f"📊 *Ваша статистика*\n\n"
-        stats_text += f"📅 Всего напоминаний: {total_count}\n"
-        stats_text += f"✅ Активных: {active_count}\n"
-        stats_text += f"✓ Выполненных: {completed_count}\n\n"
-        stats_text += f"📌 По типам:\n"
-        stats_text += f"  • Разовые: {once_count}\n"
-        stats_text += f"  • Ежедневные: {daily_count}\n"
-        stats_text += f"  • Еженедельные: {weekly_count}\n\n"
-        stats_text += f"⏰ Ближайшее напоминание: {earliest_time}\n"
-        stats_text += f"⏰ Самое позднее: {latest_time}\n\n"
-        stats_text += f"🕒 Часовой пояс: {timezone}"
-    else:
-        stats_text = f"📊 *Your Statistics*\n\n"
-        stats_text += f"📅 Total reminders: {total_count}\n"
-        stats_text += f"✅ Active: {active_count}\n"
-        stats_text += f"✓ Completed: {completed_count}\n\n"
-        stats_text += f"📌 By type:\n"
-        stats_text += f"  • One-time: {once_count}\n"
-        stats_text += f"  • Daily: {daily_count}\n"
-        stats_text += f"  • Weekly: {weekly_count}\n\n"
-        stats_text += f"⏰ Earliest reminder: {earliest_time}\n"
-        stats_text += f"⏰ Latest reminder: {latest_time}\n\n"
-        stats_text += f"🕒 Timezone: {timezone}"
-    
-    await message.answer(stats_text, parse_mode="Markdown")
-
-# ===== СОЗДАНИЕ НАПОМИНАНИЙ =====
-
-async def ask_for_time(message: types.Message, language: str, state: FSMContext):
-    """Запросить время у пользователя"""
-    date_request = {
-        'ru': "📅 *Теперь укажите время напоминания*\n\n"
-              "Примеры:\n"
-              "• Завтра 10:30\n"
-              "• Сегодня в 18:00\n"
-              "• Через 2 часа\n"
-              "• Понедельник в 9 утра\n"
-              "• 31.12.2024 23:59\n\n"
-              "Или выберите дату из календаря (/calendar)",
-        'en': "📅 *Now specify the reminder time*\n\n"
-              "Examples:\n"
-              "• Tomorrow 10:30 AM\n"
-              "• Today at 6:00 PM\n"
-              "• In 2 hours\n"
-              "• Monday at 9 AM\n"
-              "• 12/31/2024 11:59 PM\n\n"
-              "Or choose date from calendar (/calendar)"
-    }
-    
-    examples = time_parser.get_examples(language)
-    examples_text = "\n".join([f"• {example}" for example in examples[:5]])
-    
-    full_text = f"{date_request.get(language, date_request['ru'])}\n\n📋 *Примеры:*\n{examples_text}"
-    
-    keyboard = get_cancel_keyboard(language)
-    
-    await message.answer(
-        full_text,
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-    
-    await state.set_state(ReminderState.waiting_for_date)
+# ===== НОВАЯ ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЙ (время → текст → повторение) =====
 
 @dp.message(Command("add"))
 @dp.message(F.text.in_(["➕ Добавить напоминание", "➕ Add reminder"]))
@@ -1074,7 +409,6 @@ async def add_reminder_start(message: types.Message, state: FSMContext):
     language = user.get('language_code', 'ru')
     
     # Проверяем лимит
-    from config import Config
     count = db.get_user_reminder_count(user_id)
     if count >= Config.MAX_REMINDERS_PER_USER:
         limit_text = {
@@ -1130,50 +464,85 @@ async def add_reminder_start(message: types.Message, state: FSMContext):
     
     await state.set_state(ReminderState.waiting_for_time)
 
-@dp.message(ReminderState.waiting_for_text)
-async def process_reminder_text(message: types.Message, state: FSMContext):
-    """Обработка текста напоминания"""
+@dp.message(Command("quick"))
+async def cmd_quick(message: types.Message, state: FSMContext):
+    """Быстрое создание напоминания в формате "время текст" """
     user_id = message.from_user.id
     user = db.get_user(user_id)
-    language = user.get('language_code', 'ru')
     
-    # Проверяем отмену
-    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel"]
-    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
-        await state.clear()
-        cancel_text = {
-            'ru': "❌ Создание напоминания отменено",
-            'en': "❌ Reminder creation cancelled"
-        }
-        await message.answer(
-            cancel_text.get(language, cancel_text['ru']),
-            reply_markup=get_main_keyboard(language)
-        )
+    if not user:
+        await cmd_start(message)
         return
     
-    text = message.text.strip()
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
     
-    if not text or len(text) < 2:
+    # Получаем текст команды без "/quick"
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        help_text = {
+            'ru': "⚡ *Быстрое создание напоминания*\n\n"
+                  "Формат:\n`/quick завтра 15:30 сходить в музей`\n\n"
+                  "Или:\n`/quick через 2 часа позвонить маме`",
+            'en': "⚡ *Quick reminder creation*\n\n"
+                  "Format:\n`/quick tomorrow 3:30 PM go to museum`\n\n"
+                  "Or:\n`/quick in 2 hours call mom`"
+        }
+        await message.answer(help_text.get(language, help_text['ru']), parse_mode="Markdown")
+        return
+    
+    full_text = args[1]
+    
+    # Пробуем разделить на время и текст
+    time_part, text_part = time_parser.extract_time_and_text(full_text, language)
+    
+    if not time_part:
+        # Не нашли время - просим указать отдельно
         error_text = {
-            'ru': "❌ Текст напоминания слишком короткий. Введите снова:",
-            'en': "❌ Reminder text is too short. Enter again:"
+            'ru': "❌ Не удалось найти время в вашем сообщении.\n\n"
+                  "Попробуйте:\n`/quick завтра 15:30 текст`\n\n"
+                  "Или используйте обычный режим: /add",
+            'en': "❌ Could not find time in your message.\n\n"
+                  "Try:\n`/quick tomorrow 3:30 PM text`\n\n"
+                  "Or use regular mode: /add"
+        }
+        await message.answer(error_text.get(language, error_text['ru']), parse_mode="Markdown")
+        return
+    
+    if not text_part:
+        # Нашли время, но нет текста
+        text_request = {
+            'ru': f"🕐 *Время распознано:* {time_part}\n\n"
+                  "📝 *Введите текст напоминания:*",
+            'en': f"🕐 *Time recognized:* {time_part}\n\n"
+                  "📝 *Enter reminder text:*"
+        }
+        
+        await state.update_data(quick_time=time_part, timezone=timezone, language_code=language)
+        await state.set_state(ReminderState.waiting_for_text)
+        await message.answer(text_request.get(language, text_request['ru']), parse_mode="Markdown")
+        return
+    
+    # Есть и время, и текст - парсим время
+    parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
+    
+    if not parsed_time:
+        error_text = {
+            'ru': f"❌ Не удалось распознать время: '{time_part}'",
+            'en': f"❌ Could not recognize time: '{time_part}'"
         }
         await message.answer(error_text.get(language, error_text['ru']))
         return
     
-    # Сохраняем текст
-    await state.update_data(text=text)
+    # Показываем подтверждение и спрашиваем про повторения
+    await ask_for_repeat_type(message, parsed_time, text_part, timezone, language)
     
-    # Получаем данные из состояния
-    user_data = await state.get_data()
-    parsed_time_str = user_data.get('parsed_time')
-    timezone = user_data.get('timezone', 'Europe/Moscow')
-    
-    if parsed_time_str:
-        parsed_time = datetime.fromisoformat(parsed_time_str)
-        
-        # Показываем подтверждение и спрашиваем про повторения
-        await ask_for_repeat_type(message, parsed_time, text, timezone, language)
+    # Сохраняем в состоянии
+    await state.update_data(
+        parsed_time=parsed_time.isoformat(),
+        timezone=timezone,
+        text=text_part
+    )
 
 @dp.message(ReminderState.waiting_for_time)
 async def process_reminder_time(message: types.Message, state: FSMContext):
@@ -1186,15 +555,7 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
     # Проверяем отмену
     cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel"]
     if message.text.lower() in [ct.lower() for ct in cancel_texts]:
-        await state.clear()
-        cancel_text = {
-            'ru': "❌ Создание напоминания отменено",
-            'en': "❌ Reminder creation cancelled"
-        }
-        await message.answer(
-            cancel_text.get(language, cancel_text['ru']),
-            reply_markup=get_main_keyboard(language)
-        )
+        await handle_cancel(message, state, language)
         return
     
     # Парсим время
@@ -1255,10 +616,89 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
     
     await message.answer(
         confirm_text.get(language, confirm_text['ru']),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard(language)
     )
     
     await state.set_state(ReminderState.waiting_for_text)
+
+@dp.message(ReminderState.waiting_for_text)
+async def process_reminder_text(message: types.Message, state: FSMContext):
+    """Обработка текста напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    language = user.get('language_code', 'ru')
+    
+    # Проверяем отмену
+    cancel_texts = ["❌ отмена", "❌ cancel", "отмена", "cancel", "/cancel"]
+    if message.text.lower() in [ct.lower() for ct in cancel_texts]:
+        await handle_cancel(message, state, language)
+        return
+    
+    user_data = await state.get_data()
+    
+    # Проверяем, пришли ли мы из /quick команды
+    if 'quick_time' in user_data:
+        # Это /quick режим - время уже есть, парсим его
+        timezone = user_data.get('timezone', 'Europe/Moscow')
+        language = user_data.get('language_code', 'ru')
+        time_part = user_data['quick_time']
+        
+        parsed_time, parse_type, extra_info = time_parser.parse(time_part, language, timezone)
+        
+        if parsed_time:
+            text = message.text.strip()
+            await state.update_data(
+                text=text,
+                parsed_time=parsed_time.isoformat(),
+                quick_time=None  # Удаляем временный ключ
+            )
+            
+            # Переходим к выбору повторения
+            await ask_for_repeat_type(message, parsed_time, text, timezone, language)
+        else:
+            # Ошибка парсинга
+            error_text = {
+                'ru': f"❌ Ошибка: не удалось распознать время '{time_part}'",
+                'en': f"❌ Error: could not recognize time '{time_part}'"
+            }
+            await message.answer(error_text.get(language, error_text['ru']))
+            await state.clear()
+        return
+    
+    # Обычный режим /add
+    text = message.text.strip()
+    
+    if not text or len(text) < 2:
+        error_text = {
+            'ru': "❌ Текст напоминания слишком короткий. Введите снова:",
+            'en': "❌ Reminder text is too short. Enter again:"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Проверяем максимальную длину
+    if len(text) > Config.MAX_TEXT_LENGTH:
+        error_text = {
+            'ru': f"❌ Текст слишком длинный (макс. {Config.MAX_TEXT_LENGTH} символов)",
+            'en': f"❌ Text too long (max {Config.MAX_TEXT_LENGTH} characters)"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Сохраняем текст
+    await state.update_data(text=text)
+    
+    # Получаем данные из состояния
+    user_data = await state.get_data()
+    parsed_time_str = user_data.get('parsed_time')
+    timezone = user_data.get('timezone', 'Europe/Moscow')
+    
+    if parsed_time_str:
+        parsed_time = datetime.fromisoformat(parsed_time_str)
+        
+        # Показываем подтверждение и спрашиваем про повторения
+        await ask_for_repeat_type(message, parsed_time, text, timezone, language)
 
 async def ask_for_repeat_type(message: types.Message, parsed_time: datetime, 
                              text: str, timezone: str, language: str):
@@ -1301,36 +741,7 @@ async def ask_for_repeat_type(message: types.Message, parsed_time: datetime,
         reply_markup=builder.as_markup()
     )
 
-# ===== ОБРАБОТКА CALLBACK'ОВ =====
-
-@dp.callback_query(F.data.in_(["time_correct", "time_wrong"]))
-async def handle_time_confirmation(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка подтверждения времени"""
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    language = user.get('language_code', 'ru')
-    
-    if callback.data == "time_correct":
-        # Время верное, спрашиваем про повторения
-        user_data = await state.get_data()
-        text = user_data.get('text', '')
-        parsed_time_str = user_data.get('parsed_time')
-        timezone = user_data.get('timezone', 'Europe/Moscow')
-        
-        if parsed_time_str:
-            parsed_time = datetime.fromisoformat(parsed_time_str)
-            await ask_for_repeat_type(callback.message, parsed_time, text, timezone, language)
-            await callback.answer()
-        else:
-            await callback.answer("Ошибка: время не найдено", show_alert=True)
-    else:
-        # Время неверное, запрашиваем заново
-        user_data = await state.get_data()
-        text = user_data.get('text', '')
-        
-        await state.update_data(text=text)
-        await ask_for_time(callback.message, language, state)
-        await callback.answer()
+# ===== ОБРАБОТКА CALLBACK'ОВ ДЛЯ ПОВТОРЕНИЙ =====
 
 @dp.callback_query(F.data.startswith("repeat_"))
 async def handle_repeat_type(callback: types.CallbackQuery, state: FSMContext):
@@ -1624,7 +1035,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             parsed_time = user_tz.localize(parsed_time)
         
         # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ И СЕКУНДЫ
-        # Приводим к целым минутам (или можно оставить секунды, но без микросекунд)
+        # Приводим к целым минутам
         parsed_time = parsed_time.replace(second=0, microsecond=0)
         
         # Конвертируем в UTC
@@ -1652,7 +1063,6 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             timezone=timezone
         )
         
-                
         # Форматируем для вывода (в местном времени пользователя)
         formatted_time = format_local_time(parsed_time, timezone, language)
         
@@ -1721,7 +1131,202 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         )
         
         logger.error(f"Failed to create reminder for user {user_id}: {e}", exc_info=True)
+
+# ===== КОМАНДЫ ДЛЯ СЕГОДНЯ/ЗАВТРА =====
+
+@dp.message(Command("today"))
+@dp.message(F.text.in_(["📅 На сегодня", "📅 For today"]))
+async def cmd_today(message: types.Message):
+    """Показать напоминания на сегодня"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Получаем все активные напоминания пользователя
+    reminders = db.get_user_reminders(user_id, active_only=True)
+    
+    if not reminders:
+        empty_text = {
+            'ru': "📭 У вас нет активных напоминаний на сегодня.",
+            'en': "📭 You have no active reminders for today."
+        }
+        await message.answer(empty_text.get(language, empty_text['ru']))
+        return
+    
+    # Текущее время в часовом поясе пользователя
+    user_tz = pytz.timezone(timezone)
+    now_utc = datetime.now(pytz.UTC)
+    now_local = now_utc.astimezone(user_tz)
+    
+    today_reminders = []
+    
+    for reminder in reminders:
+        # Получаем время напоминания
+        remind_time = reminder.get('next_remind_time_utc')
+        if isinstance(remind_time, str):
+            try:
+                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+                remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
+            except:
+                continue
         
+        # Конвертируем в локальное время пользователя
+        local_time = remind_time.astimezone(user_tz)
+        
+        # Проверяем, что напоминание сегодня
+        if local_time.date() == now_local.date():
+            today_reminders.append((reminder, local_time))
+    
+    if not today_reminders:
+        empty_text = {
+            'ru': "📅 У вас нет напоминаний на сегодня.",
+            'en': "📅 You have no reminders for today."
+        }
+        await message.answer(empty_text.get(language, empty_text['ru']))
+        return
+    
+    # Сортируем по времени
+    today_reminders.sort(key=lambda x: x[1])
+    
+    # Формируем ответ
+    response_text = {
+        'ru': f"📅 *Напоминания на сегодня ({now_local.strftime('%d.%m.%Y')}):*\n\n",
+        'en': f"📅 *Reminders for today ({now_local.strftime('%B %d, %Y')}):*\n\n"
+    }.get(language, f"📅 Today's reminders:\n\n")
+    
+    for i, (reminder, local_time) in enumerate(today_reminders, 1):
+        # Форматируем время
+        time_str = local_time.strftime('%H:%M')
+        
+        # Тип повторения
+        repeat_type = reminder['repeat_type']
+        if repeat_type == 'once':
+            repeat_symbol = "✅"
+        elif repeat_type == 'daily':
+            repeat_symbol = "🔄"
+        elif repeat_type == 'weekly':
+            repeat_symbol = "📅"
+        else:
+            repeat_symbol = "📌"
+        
+        response_text += f"{i}. {repeat_symbol} *{time_str}* - {reminder['text']}\n"
+        response_text += f"   🆔 ID: {reminder['id']}\n\n"
+    
+    response_text += {
+        'ru': f"Всего: {len(today_reminders)} напоминаний",
+        'en': f"Total: {len(today_reminders)} reminders"
+    }.get(language, f"Total: {len(today_reminders)}")
+    
+    await message.answer(response_text, parse_mode="Markdown")
+
+@dp.message(Command("tomorrow"))
+@dp.message(F.text.in_(["📆 На завтра", "📆 For tomorrow"]))
+async def cmd_tomorrow(message: types.Message):
+    """Показать напоминания на завтра"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Получаем все активные напоминания пользователя
+    reminders = db.get_user_reminders(user_id, active_only=True)
+    
+    if not reminders:
+        empty_text = {
+            'ru': "📭 У вас нет активных напоминаний на завтра.",
+            'en': "📭 You have no active reminders for tomorrow."
+        }
+        await message.answer(empty_text.get(language, empty_text['ru']))
+        return
+    
+    # Время в часовом поясе пользователя
+    user_tz = pytz.timezone(timezone)
+    now_utc = datetime.now(pytz.UTC)
+    now_local = now_utc.astimezone(user_tz)
+    tomorrow_local = now_local + timedelta(days=1)
+    
+    tomorrow_reminders = []
+    
+    for reminder in reminders:
+        # Получаем время напоминания
+        remind_time = reminder.get('next_remind_time_utc')
+        if isinstance(remind_time, str):
+            try:
+                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+                remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
+            except:
+                continue
+        
+        # Конвертируем в локальное время пользователя
+        local_time = remind_time.astimezone(user_tz)
+        
+        # Проверяем, что напоминание завтра
+        if local_time.date() == tomorrow_local.date():
+            tomorrow_reminders.append((reminder, local_time))
+    
+    if not tomorrow_reminders:
+        empty_text = {
+            'ru': "📆 У вас нет напоминаний на завтра.",
+            'en': "📆 You have no reminders for tomorrow."
+        }
+        await message.answer(empty_text.get(language, empty_text['ru']))
+        return
+    
+    # Сортируем по времени
+    tomorrow_reminders.sort(key=lambda x: x[1])
+    
+    # Форматируем дату завтра
+    if language == 'ru':
+        months_ru = [
+            'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+            'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'
+        ]
+        date_str = f"{tomorrow_local.day} {months_ru[tomorrow_local.month - 1]} {tomorrow_local.year}"
+    else:
+        date_str = tomorrow_local.strftime("%B %d, %Y")
+    
+    # Формируем ответ
+    response_text = {
+        'ru': f"📆 *Напоминания на завтра ({date_str}):*\n\n",
+        'en': f"📆 *Reminders for tomorrow ({date_str}):*\n\n"
+    }.get(language, f"📆 Tomorrow's reminders:\n\n")
+    
+    for i, (reminder, local_time) in enumerate(tomorrow_reminders, 1):
+        # Форматируем время
+        time_str = local_time.strftime('%H:%M')
+        
+        # Тип повторения
+        repeat_type = reminder['repeat_type']
+        if repeat_type == 'once':
+            repeat_symbol = "✅"
+        elif repeat_type == 'daily':
+            repeat_symbol = "🔄"
+        elif repeat_type == 'weekly':
+            repeat_symbol = "📅"
+        else:
+            repeat_symbol = "📌"
+        
+        response_text += f"{i}. {repeat_symbol} *{time_str}* - {reminder['text']}\n"
+        response_text += f"   🆔 ID: {reminder['id']}\n\n"
+    
+    response_text += {
+        'ru': f"Всего: {len(tomorrow_reminders)} напоминаний",
+        'en': f"Total: {len(tomorrow_reminders)} reminders"
+    }.get(language, f"Total: {len(tomorrow_reminders)}")
+    
+    await message.answer(response_text, parse_mode="Markdown")
+
 # ===== ПРОСМОТР НАПОМИНАНИЙ =====
 
 @dp.message(Command("list"))
@@ -1807,6 +1412,334 @@ async def cmd_list(message: types.Message):
     
     await message.answer(response_text, parse_mode="Markdown")
 
+# ===== УДАЛЕНИЕ НАПОМИНАНИЙ =====
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: types.Message):
+    """Удалить напоминание по ID"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем аргумент (ID напоминания)
+    args = message.text.split()
+    if len(args) < 2:
+        error_text = {
+            'ru': "❌ *Использование:* /delete <ID_напоминания>\n\n"
+                  "Пример:\n`/delete 5`\n\n"
+                  "Используйте /list чтобы увидеть ID ваших напоминаний.",
+            'en': "❌ *Usage:* /delete <reminder_id>\n\n"
+                  "Example:\n`/delete 5`\n\n"
+                  "Use /list to see your reminder IDs."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        reminder_id = int(args[1])
+    except ValueError:
+        error_text = {
+            'ru': "❌ ID должен быть числом!",
+            'en': "❌ ID must be a number!"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Пробуем удалить
+    success = db.delete_reminder(reminder_id, user_id)
+    
+    if success:
+        success_text = {
+            'ru': f"✅ Напоминание *{reminder_id}* удалено!",
+            'en': f"✅ Reminder *{reminder_id}* deleted!"
+        }
+        await message.answer(
+            success_text.get(language, success_text['ru']),
+            parse_mode="Markdown"
+        )
+    else:
+        error_text = {
+            'ru': f"❌ Не удалось удалить напоминание *{reminder_id}*.\n"
+                  "Проверьте ID или убедитесь, что напоминание принадлежит вам.",
+            'en': f"❌ Failed to delete reminder *{reminder_id}*.\n"
+                  "Check the ID or make sure the reminder belongs to you."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: types.Message):
+    """Удалить все выполненные напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем все напоминания пользователя
+    all_reminders = db.get_user_reminders(user_id, active_only=False)
+    
+    if not all_reminders:
+        empty_text = {
+            'ru': "📭 У вас нет напоминаний.",
+            'en': "📭 You have no reminders."
+        }
+        await message.answer(empty_text.get(language, empty_text['ru']))
+        return
+    
+    # Считаем неактивные (выполненные)
+    inactive_reminders = [r for r in all_reminders if not r['is_active']]
+    
+    if not inactive_reminders:
+        no_inactive_text = {
+            'ru': "✅ У вас нет выполненных напоминаний для удаления.",
+            'en': "✅ You have no completed reminders to delete."
+        }
+        await message.answer(no_inactive_text.get(language, no_inactive_text['ru']))
+        return
+    
+    # Удаляем каждое неактивное напоминание
+    deleted_count = 0
+    for reminder in inactive_reminders:
+        if db.delete_reminder(reminder['id'], user_id):
+            deleted_count += 1
+    
+    result_text = {
+        'ru': f"🧹 Удалено {deleted_count} выполненных напоминаний!",
+        'en': f"🧹 Deleted {deleted_count} completed reminders!"
+    }
+    
+    await message.answer(result_text.get(language, result_text['ru']))
+
+# ===== ПАУЗА/ВОЗОБНОВЛЕНИЕ =====
+
+@dp.message(Command("pause"))
+async def cmd_pause(message: types.Message):
+    """Поставить напоминание на паузу"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем аргумент (ID напоминания)
+    args = message.text.split()
+    if len(args) < 2:
+        error_text = {
+            'ru': "❌ *Использование:* /pause <ID_напоминания>\n\n"
+                  "Пример:\n`/pause 5`\n\n"
+                  "Используйте /list чтобы увидеть ID ваших напоминаний.",
+            'en': "❌ *Usage:* /pause <reminder_id>\n\n"
+                  "Example:\n`/pause 5`\n\n"
+                  "Use /list to see your reminder IDs."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        reminder_id = int(args[1])
+    except ValueError:
+        error_text = {
+            'ru': "❌ ID должен быть числом!",
+            'en': "❌ ID must be a number!"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Пробуем поставить на паузу
+    success = db.pause_reminder(reminder_id, user_id)
+    
+    if success:
+        success_text = {
+            'ru': f"⏸️ Напоминание *{reminder_id}* поставлено на паузу.",
+            'en': f"⏸️ Reminder *{reminder_id}* paused."
+        }
+        await message.answer(
+            success_text.get(language, success_text['ru']),
+            parse_mode="Markdown"
+        )
+    else:
+        error_text = {
+            'ru': f"❌ Не удалось поставить напоминание *{reminder_id}* на паузу.\n"
+                  "Проверьте ID или убедитесь, что напоминание принадлежит вам.",
+            'en': f"❌ Failed to pause reminder *{reminder_id}*.\n"
+                  "Check the ID or make sure the reminder belongs to you."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+
+@dp.message(Command("resume"))
+async def cmd_resume(message: types.Message):
+    """Возобновить напоминание"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    # Получаем аргумент (ID напоминания)
+    args = message.text.split()
+    if len(args) < 2:
+        error_text = {
+            'ru': "❌ *Использование:* /resume <ID_напоминания>\n\n"
+                  "Пример:\n`/resume 5`\n\n"
+                  "Используйте /list чтобы увидеть ID ваших напоминаний.",
+            'en': "❌ *Usage:* /resume <reminder_id>\n\n"
+                  "Example:\n`/resume 5`\n\n"
+                  "Use /list to see your reminder IDs."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        reminder_id = int(args[1])
+    except ValueError:
+        error_text = {
+            'ru': "❌ ID должен быть числом!",
+            'en': "❌ ID must be a number!"
+        }
+        await message.answer(error_text.get(language, error_text['ru']))
+        return
+    
+    # Пробуем возобновить
+    success = db.resume_reminder(reminder_id, user_id)
+    
+    if success:
+        success_text = {
+            'ru': f"▶️ Напоминание *{reminder_id}* возобновлено.",
+            'en': f"▶️ Reminder *{reminder_id}* resumed."
+        }
+        await message.answer(
+            success_text.get(language, success_text['ru']),
+            parse_mode="Markdown"
+        )
+    else:
+        error_text = {
+            'ru': f"❌ Не удалось возобновить напоминание *{reminder_id}*.\n"
+                  "Проверьте ID или убедитесь, что напоминание принадлежит вам.",
+            'en': f"❌ Failed to resume reminder *{reminder_id}*.\n"
+                  "Check the ID or make sure the reminder belongs to you."
+        }
+        await message.answer(
+            error_text.get(language, error_text['ru']),
+            parse_mode="Markdown"
+        )
+
+# ===== СТАТИСТИКА =====
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Показать статистику пользователя"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Получаем все напоминания пользователя
+    reminders = db.get_user_reminders(user_id, active_only=False)
+    active_reminders = db.get_user_reminders(user_id, active_only=True)
+    
+    # Считаем статистику
+    total_count = len(reminders)
+    active_count = len(active_reminders)
+    completed_count = total_count - active_count
+    
+    # Считаем по типам
+    once_count = sum(1 for r in active_reminders if r['repeat_type'] == 'once')
+    daily_count = sum(1 for r in active_reminders if r['repeat_type'] == 'daily')
+    weekly_count = sum(1 for r in active_reminders if r['repeat_type'] == 'weekly')
+    
+    # Самые ранние и поздние напоминания
+    if active_reminders:
+        # Преобразуем времена
+        reminder_times = []
+        for reminder in active_reminders:
+            remind_time = reminder.get('next_remind_time_utc')
+            if isinstance(remind_time, str):
+                try:
+                    remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+                    remind_time = pytz.UTC.localize(remind_time) if remind_time.tzinfo is None else remind_time
+                    reminder_times.append((reminder, remind_time))
+                except:
+                    continue
+        
+        if reminder_times:
+            # Сортируем по времени
+            reminder_times.sort(key=lambda x: x[1])
+            earliest = reminder_times[0]
+            latest = reminder_times[-1]
+            
+            # Конвертируем в локальное время
+            user_tz = pytz.timezone(timezone)
+            earliest_local = earliest[1].astimezone(user_tz)
+            latest_local = latest[1].astimezone(user_tz)
+            
+            earliest_time = earliest_local.strftime('%d.%m.%Y %H:%M')
+            latest_time = latest_local.strftime('%d.%m.%Y %H:%M')
+        else:
+            earliest_time = latest_time = "-"
+    else:
+        earliest_time = latest_time = "-"
+    
+    if language == 'ru':
+        stats_text = f"📊 *Ваша статистика*\n\n"
+        stats_text += f"📅 Всего напоминаний: {total_count}\n"
+        stats_text += f"✅ Активных: {active_count}\n"
+        stats_text += f"✓ Выполненных: {completed_count}\n\n"
+        stats_text += f"📌 По типам:\n"
+        stats_text += f"  • Разовые: {once_count}\n"
+        stats_text += f"  • Ежедневные: {daily_count}\n"
+        stats_text += f"  • Еженедельные: {weekly_count}\n\n"
+        stats_text += f"⏰ Ближайшее напоминание: {earliest_time}\n"
+        stats_text += f"⏰ Самое позднее: {latest_time}\n\n"
+        stats_text += f"🕒 Часовой пояс: {timezone}"
+    else:
+        stats_text = f"📊 *Your Statistics*\n\n"
+        stats_text += f"📅 Total reminders: {total_count}\n"
+        stats_text += f"✅ Active: {active_count}\n"
+        stats_text += f"✓ Completed: {completed_count}\n\n"
+        stats_text += f"📌 By type:\n"
+        stats_text += f"  • One-time: {once_count}\n"
+        stats_text += f"  • Daily: {daily_count}\n"
+        stats_text += f"  • Weekly: {weekly_count}\n\n"
+        stats_text += f"⏰ Earliest reminder: {earliest_time}\n"
+        stats_text += f"⏰ Latest reminder: {latest_time}\n\n"
+        stats_text += f"🕒 Timezone: {timezone}"
+    
+    await message.answer(stats_text, parse_mode="Markdown")
+
 # ===== КАЛЕНДАРЬ =====
 
 @dp.message(Command("calendar"))
@@ -1842,6 +1775,110 @@ async def cmd_calendar(message: types.Message):
     full_text = f"{calendar_text.get(language, calendar_text['ru'])}\n\n📋 *Примеры:*\n{examples_text}"
     
     await message.answer(full_text, parse_mode="Markdown")
+
+# ===== ОБРАБОТКА КНОПКИ НАСТРОЕК =====
+
+@dp.message(F.text.in_(["⚙️ Настройки", "⚙️ Settings"]))
+async def cmd_settings_button(message: types.Message):
+    """Обработка кнопки настроек"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    settings_text = {
+        'ru': "⚙️ *Настройки*\n\n"
+              "Выберите опцию:\n"
+              "/language - Сменить язык\n"
+              "/timezone - Установить часовой пояс\n"
+              "/stats - Статистика\n\n"
+              "Текущие настройки:\n"
+              f"🌐 Язык: {'Русский' if language == 'ru' else 'English'}\n"
+              f"🕒 Часовой пояс: {user.get('timezone', 'Europe/Moscow')}",
+        'en': "⚙️ *Settings*\n\n"
+              "Choose an option:\n"
+              "/language - Change language\n"
+              "/timezone - Set timezone\n"
+              "/stats - Statistics\n\n"
+              "Current settings:\n"
+              f"🌐 Language: {'Russian' if language == 'ru' else 'English'}\n"
+              f"🕒 Timezone: {user.get('timezone', 'Europe/Moscow')}"
+    }
+    
+    await message.answer(
+        settings_text.get(language, settings_text['en']),
+        parse_mode="Markdown"
+    )
+
+# ===== ТЕСТОВЫЕ КОМАНДЫ =====
+
+@dp.message(Command("test_time"))
+async def cmd_test_time(message: types.Message):
+    """Тестовая команда для проверки времени"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    timezone = user.get('timezone', 'Europe/Moscow')
+    
+    # Текущее время в разных часовых поясах
+    now_utc = datetime.now(pytz.UTC)
+    user_tz = pytz.timezone(timezone)
+    now_local = now_utc.astimezone(user_tz)
+    
+    test_text = {
+        'ru': f"⏰ *Тест времени*\n\n"
+              f"🕐 Текущее время UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+              f"🏠 Ваше местное время ({timezone}): {now_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+              f"*Примеры:*\n"
+              f"• 'через 5 минут' - напоминание через 5 минут\n"
+              f"• '18:30' - сегодня в 18:30\n"
+              f"• 'завтра 10:00' - завтра в 10:00",
+        'en': f"⏰ *Time Test*\n\n"
+              f"🕐 Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+              f"🏠 Your local time ({timezone}): {now_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+              f"*Examples:*\n"
+              f"• 'in 5 minutes' - reminder in 5 minutes\n"
+              f"• '18:30' - today at 18:30\n"
+              f"• 'tomorrow 10:00' - tomorrow at 10:00"
+    }
+    
+    await message.answer(
+        test_text.get(language, test_text['en']),
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("check_now"))
+async def cmd_check_now(message: types.Message):
+    """Немедленно проверить и отправить напоминания"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message)
+        return
+    
+    language = user.get('language_code', 'ru')
+    
+    await message.answer("🔍 Проверяю напоминания...")
+    
+    # Немедленно запускаем проверку
+    await check_and_send_reminders()
+    
+    response = {
+        'ru': "✅ Проверка завершена. Смотрите логи бота.",
+        'en': "✅ Check completed. See bot logs."
+    }
+    
+    await message.answer(response.get(language, response['en']))
 
 # ===== ПЛАНИРОВЩИК =====
 
