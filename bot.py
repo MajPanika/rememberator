@@ -2125,6 +2125,7 @@ ADMINS={user_id}
         if admin_row:
             await message.answer(f"✅ Найден в таблице admins: {dict(admin_row)}")
         else:
+            await message.answer("❌ Не найден в таблице admins")
 
 @dp.callback_query(F.data.startswith("admin_"))
 async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext):
