@@ -4,6 +4,10 @@ Reminder Pro Bot - Умная напоминалка с поддержкой tim
 НОВАЯ ЛОГИКА: время → текст → повторение
 """
 
+import os
+import psutil
+import platform
+
 import asyncio
 import logging
 import sys
@@ -47,6 +51,21 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 # Инициализация компонентов
 db = Database(Config.DB_NAME)
 time_parser = TimeParser()
+
+# ===== АДМИН-УТИЛИТЫ =====
+
+def is_admin(user_id: int) -> bool:
+    """Проверить, является ли пользователь админом"""
+    return user_id in Config.ADMINS or db.is_admin(user_id)
+
+async def admin_only(handler):
+    """Декоратор для проверки прав админа"""
+    async def wrapper(message: types.Message, *args, **kwargs):
+        if not is_admin(message.from_user.id):
+            await message.answer("⛔ У вас нет прав администратора.")
+            return
+        return await handler(message, *args, **kwargs)
+    return wrapper
 
 # ===== НОВЫЕ СОСТОЯНИЯ FSM (время → текст → повторение) =====
 class ReminderState(StatesGroup):
@@ -1575,6 +1594,715 @@ async def cmd_settings_button(message: types.Message):
         settings_text.get(language, settings_text['en']),
         parse_mode="Markdown"
     )
+
+# ===== АДМИН-КОМАНДЫ =====
+
+@dp.message(Command("admin"))
+@dp.message(F.text.in_(["👑 Админ-панель", "👑 Admin Panel"]))
+async def cmd_admin(message: types.Message):
+    """Админ-панель"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    user = db.get_user(message.from_user.id)
+    language = user.get('language_code', 'ru') if user else 'ru'
+    
+    admin_text = {
+        'ru': """👑 *Админ-панель Reminder Pro*
+
+📊 *Статистика и мониторинг:*
+/stats - Общая статистика бота
+/users - Список пользователей
+/logs - Просмотр логов
+/analytics - Аналитика использования
+
+📢 *Управление:*
+/broadcast - Рассылка сообщений
+/backup - Создать резервную копию
+/cleanup - Очистка старых данных
+
+🔧 *Система:*
+/restart - Перезапустить проверку напоминаний
+/recover - Восстановить пропущенные
+/test - Тестовые команды
+
+💬 *Поиск:*
+/find_user <id/name> - Найти пользователя
+/find_reminder <id> - Найти напоминание
+
+🛠 *Настройки:*
+/set_limit <число> - Установить лимит напоминаний
+/set_timezone <часовой пояс> - Тест таймзоны""",
+        
+        'en': """👑 *Admin Panel Reminder Pro*
+
+📊 *Statistics & Monitoring:*
+/stats - Bot statistics
+/users - User list
+/logs - View logs
+/analytics - Usage analytics
+
+📢 *Management:*
+/broadcast - Send broadcast
+/backup - Create backup
+/cleanup - Clean old data
+
+🔧 *System:*
+/restart - Restart reminder check
+/recover - Recover missed reminders
+/test - Test commands
+
+💬 *Search:*
+/find_user <id/name> - Find user
+/find_reminder <id> - Find reminder
+
+🛠 *Settings:*
+/set_limit <number> - Set reminder limit
+/set_timezone <timezone> - Test timezone"""
+    }
+    
+    # Создаем админ-клавиатуру
+    builder = InlineKeyboardBuilder()
+    
+    if language == 'ru':
+        builder.row(
+            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
+            InlineKeyboardButton(text="💾 Бэкап", callback_data="admin_backup"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📋 Логи", callback_data="admin_logs"),
+            InlineKeyboardButton(text="🧹 Очистка", callback_data="admin_cleanup"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="🔄 Перезапуск", callback_data="admin_restart"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings"),
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="📊 Statistics", callback_data="admin_stats"),
+            InlineKeyboardButton(text="👥 Users", callback_data="admin_users"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"),
+            InlineKeyboardButton(text="💾 Backup", callback_data="admin_backup"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📋 Logs", callback_data="admin_logs"),
+            InlineKeyboardButton(text="🧹 Cleanup", callback_data="admin_cleanup"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="🔄 Restart", callback_data="admin_restart"),
+            InlineKeyboardButton(text="⚙️ Settings", callback_data="admin_settings"),
+        )
+    
+    await message.answer(
+        admin_text.get(language, admin_text['ru']),
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.message(Command("stats"))
+async def cmd_stats_admin(message: types.Message):
+    """Статистика бота (админ)"""
+    if not is_admin(message.from_user.id):
+        await cmd_stats(message)  # Показываем обычную статистику
+        return
+    
+    try:
+        # Получаем статистику из БД
+        stats = db.get_bot_statistics()
+        
+        # Получаем системную информацию
+        import psutil
+        import platform
+        from datetime import datetime
+        
+        # Использование памяти
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        # Время работы бота
+        import time
+        start_time = getattr(cmd_stats_admin, '_start_time', time.time())
+        uptime_seconds = time.time() - start_time
+        uptime_str = str(timedelta(seconds=int(uptime_seconds)))
+        
+        user = db.get_user(message.from_user.id)
+        language = user.get('language_code', 'ru') if user else 'ru'
+        
+        if language == 'ru':
+            stats_text = f"""📊 *Статистика бота (Админ)*
+
+👥 *Пользователи:*
+• Всего: {stats.get('total_users', 0)}
+• Активных за неделю: {stats.get('active_week', 0)}
+• Новых сегодня: {stats.get('new_today', 0)}
+
+🔔 *Напоминания:*
+• Всего: {stats.get('total_reminders', 0)}
+• Активных: {stats.get('active_reminders', 0)}
+• Повторяющихся: {stats.get('repeating_reminders', 0)}
+• На паузе: {stats.get('paused_reminders', 0)}
+• Создано сегодня: {stats.get('created_today', 0)}
+
+💻 *Система:*
+• Время работы: {uptime_str}
+• Память: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)
+• Диск: {disk.percent}% ({disk.used//1024//1024}MB/{disk.total//1024//1024}MB)
+• ОС: {platform.system()} {platform.release()}
+
+📈 *Лимиты:*
+• Макс. напоминаний: {Config.MAX_REMINDERS_PER_USER}
+• Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}"""
+        else:
+            stats_text = f"""📊 *Bot Statistics (Admin)*
+
+👥 *Users:*
+• Total: {stats.get('total_users', 0)}
+• Active this week: {stats.get('active_week', 0)}
+• New today: {stats.get('new_today', 0)}
+
+🔔 *Reminders:*
+• Total: {stats.get('total_reminders', 0)}
+• Active: {stats.get('active_reminders', 0)}
+• Repeating: {stats.get('repeating_reminders', 0)}
+• Paused: {stats.get('paused_reminders', 0)}
+• Created today: {stats.get('created_today', 0)}
+
+💻 *System:*
+• Uptime: {uptime_str}
+• Memory: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)
+• Disk: {disk.percent}% ({disk.used//1024//1024}MB/{disk.total//1024//1024}MB)
+• OS: {platform.system()} {platform.release()}
+
+📈 *Limits:*
+• Max reminders: {Config.MAX_REMINDERS_PER_USER}
+• Default timezone: {Config.DEFAULT_TIMEZONE}"""
+        
+        await message.answer(stats_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error in admin stats: {e}")
+        error_text = {
+            'ru': f"❌ Ошибка получения статистики: {e}",
+            'en': f"❌ Error getting statistics: {e}"
+        }
+        user = db.get_user(message.from_user.id)
+        language = user.get('language_code', 'ru') if user else 'ru'
+        await message.answer(error_text.get(language, error_text['ru']))
+
+# Сохраняем время запуска для статистики
+import time
+cmd_stats_admin._start_time = time.time()
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    """Список пользователей"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    try:
+        # Получаем пользователей
+        users = db.get_all_users(limit=20)
+        
+        if not users:
+            await message.answer("📭 Нет пользователей в базе данных.")
+            return
+        
+        user = db.get_user(message.from_user.id)
+        language = user.get('language_code', 'ru') if user else 'ru'
+        
+        if language == 'ru':
+            text = f"👥 *Последние 20 пользователей (всего: {len(users)}):*\n\n"
+            for i, user_data in enumerate(users, 1):
+                username = f"@{user_data['username']}" if user_data['username'] else "без username"
+                reg_date = user_data['registered_at']
+                if isinstance(reg_date, str):
+                    try:
+                        reg_date = datetime.fromisoformat(reg_date)
+                    except:
+                        pass
+                
+                if isinstance(reg_date, datetime):
+                    reg_str = reg_date.strftime("%d.%m.%Y")
+                else:
+                    reg_str = str(reg_date)[:10]
+                
+                text += f"{i}. *ID:* {user_data['user_id']}\n"
+                text += f"   👤 {user_data['first_name']} {user_data.get('last_name', '')}\n"
+                text += f"   📱 {username}\n"
+                text += f"   🌐 {user_data.get('language_code', 'ru')}\n"
+                text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
+                text += f"   📅 Регистрация: {reg_str}\n"
+                text += f"   🔔 Напоминаний: {user_data.get('reminder_count', 0)}\n\n"
+        else:
+            text = f"👥 *Last 20 users (total: {len(users)}):*\n\n"
+            for i, user_data in enumerate(users, 1):
+                username = f"@{user_data['username']}" if user_data['username'] else "no username"
+                reg_date = user_data['registered_at']
+                if isinstance(reg_date, str):
+                    try:
+                        reg_date = datetime.fromisoformat(reg_date)
+                    except:
+                        pass
+                
+                if isinstance(reg_date, datetime):
+                    reg_str = reg_date.strftime("%b %d, %Y")
+                else:
+                    reg_str = str(reg_date)[:10]
+                
+                text += f"{i}. *ID:* {user_data['user_id']}\n"
+                text += f"   👤 {user_data['first_name']} {user_data.get('last_name', '')}\n"
+                text += f"   📱 {username}\n"
+                text += f"   🌐 {user_data.get('language_code', 'en')}\n"
+                text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
+                text += f"   📅 Registered: {reg_str}\n"
+                text += f"   🔔 Reminders: {user_data.get('reminder_count', 0)}\n\n"
+        
+        # Добавляем кнопки навигации
+        builder = InlineKeyboardBuilder()
+        if language == 'ru':
+            builder.row(
+                InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+                InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
+            )
+            builder.row(
+                InlineKeyboardButton(text="🔍 Поиск пользователя", callback_data="admin_find_user"),
+            )
+        else:
+            builder.row(
+                InlineKeyboardButton(text="📊 Statistics", callback_data="admin_stats"),
+                InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"),
+            )
+            builder.row(
+                InlineKeyboardButton(text="🔍 Find User", callback_data="admin_find_user"),
+            )
+        
+        await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error(f"Error getting users: {e}")
+        await message.answer(f"❌ Ошибка получения списка пользователей: {e}")
+
+# Состояния для рассылки
+class BroadcastState(StatesGroup):
+    waiting_for_message = State()
+    waiting_for_confirmation = State()
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message, state: FSMContext):
+    """Начать рассылку сообщений"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    user = db.get_user(message.from_user.id)
+    language = user.get('language_code', 'ru') if user else 'ru'
+    
+    instruction = {
+        'ru': "📢 *Рассылка сообщений*\n\nВведите сообщение для рассылки всем пользователям.\n\nМожно использовать Markdown разметку.\n\nИспользуйте /cancel для отмены.",
+        'en': "📢 *Broadcast Message*\n\nEnter message to send to all users.\n\nYou can use Markdown formatting.\n\nUse /cancel to cancel."
+    }
+    
+    await message.answer(
+        instruction.get(language, instruction['ru']),
+        parse_mode="Markdown"
+    )
+    await state.set_state(BroadcastState.waiting_for_message)
+
+@dp.message(BroadcastState.waiting_for_message)
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    """Обработка сообщения для рассылки"""
+    if message.text == '/cancel':
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.")
+        return
+    
+    # Сохраняем сообщение
+    await state.update_data(broadcast_message=message.text, broadcast_mode='text')
+    
+    user = db.get_user(message.from_user.id)
+    language = user.get('language_code', 'ru') if user else 'ru'
+    
+    # Показываем предварительный просмотр
+    preview_text = {
+        'ru': f"📋 *Предварительный просмотр:*\n\n{message.text}\n\nОтправить это сообщение всем пользователям?",
+        'en': f"📋 *Preview:*\n\n{message.text}\n\nSend this message to all users?"
+    }
+    
+    # Кнопки подтверждения
+    builder = InlineKeyboardBuilder()
+    if language == 'ru':
+        builder.row(
+            InlineKeyboardButton(text="✅ Да, отправить", callback_data="broadcast_confirm"),
+            InlineKeyboardButton(text="❌ Нет, отменить", callback_data="broadcast_cancel"),
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="✅ Yes, send", callback_data="broadcast_confirm"),
+            InlineKeyboardButton(text="❌ No, cancel", callback_data="broadcast_cancel"),
+        )
+    
+    await message.answer(
+        preview_text.get(language, preview_text['ru']),
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(BroadcastState.waiting_for_confirmation)
+
+@dp.callback_query(F.data.startswith("broadcast_"))
+async def handle_broadcast_confirmation(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка подтверждения рассылки"""
+    if callback.data == "broadcast_cancel":
+        await state.clear()
+        await callback.message.edit_text("❌ Рассылка отменена.")
+        await callback.answer()
+        return
+    
+    if callback.data == "broadcast_confirm":
+        await callback.message.edit_text("🔄 Начинаю рассылку...")
+        
+        user_data = await state.get_data()
+        message_text = user_data.get('broadcast_message', '')
+        
+        if not message_text:
+            await callback.message.edit_text("❌ Ошибка: сообщение не найдено.")
+            await state.clear()
+            return
+        
+        # Получаем всех пользователей
+        all_users = db.get_all_users(limit=1000)  # Ограничим 1000 пользователей
+        
+        success_count = 0
+        fail_count = 0
+        total = len(all_users)
+        
+        # Отправляем прогресс
+        progress_msg = await callback.message.answer(f"📤 Рассылка: 0/{total}")
+        
+        for i, user in enumerate(all_users, 1):
+            try:
+                await bot.send_message(
+                    user['user_id'],
+                    message_text,
+                    parse_mode="Markdown"
+                )
+                success_count += 1
+                
+                # Обновляем прогресс каждые 10 сообщений
+                if i % 10 == 0 or i == total:
+                    try:
+                        await progress_msg.edit_text(f"📤 Рассылка: {i}/{total} (✓ {success_count} ✗ {fail_count})")
+                    except:
+                        pass
+                
+                # Пауза чтобы не превысить лимиты Telegram
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"Failed to send broadcast to {user['user_id']}: {e}")
+        
+        # Итог
+        result_text = f"""✅ *Рассылка завершена*
+
+• Всего пользователей: {total}
+• Успешно отправлено: {success_count}
+• Не удалось отправить: {fail_count}
+
+📊 Успешных: {success_count/total*100:.1f}%"""
+        
+        await callback.message.edit_text(result_text, parse_mode="Markdown")
+        await state.clear()
+        
+        # Логируем рассылку
+        db.log_event(
+            log_type='broadcast',
+            user_id=callback.from_user.id,
+            message=f"Рассылка сообщения",
+            details=f"Отправлено: {success_count}/{total}, текст: {message_text[:100]}..."
+        )
+        
+        await callback.answer()
+
+@dp.message(Command("backup"))
+async def cmd_backup(message: types.Message):
+    """Создать резервную копию БД"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    try:
+        await message.answer("💾 Создаю резервную копию базы данных...")
+        
+        # Создаем бэкап
+        db.backup_database()
+        
+        # Получаем список бэкапов
+        backup_dir = 'backups'
+        if os.path.exists(backup_dir):
+            backups = sorted([f for f in os.listdir(backup_dir) if f.endswith('.db')], reverse=True)
+            
+            if backups:
+                latest = backups[0]
+                size = os.path.getsize(os.path.join(backup_dir, latest))
+                size_mb = size / 1024 / 1024
+                
+                text = f"""✅ *Резервная копия создана*
+
+• Файл: `{latest}`
+• Размер: {size_mb:.2f} MB
+• Всего бэкапов: {len(backups)}
+
+💡 Последние 5 бэкапов:"""
+                
+                for i, backup in enumerate(backups[:5], 1):
+                    backup_time = backup.replace('reminders_backup_', '').replace('.db', '')
+                    text += f"\n{i}. {backup_time}"
+                
+                await message.answer(text, parse_mode="Markdown")
+            else:
+                await message.answer("✅ Резервная копия создана, но файлы не найдены.")
+        else:
+            await message.answer("✅ Резервная копия создана.")
+            
+    except Exception as e:
+        logger.error(f"Error creating backup: {e}")
+        await message.answer(f"❌ Ошибка создания резервной копии: {e}")
+
+@dp.callback_query(F.data.startswith("admin_"))
+async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка кнопок админ-панели"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет прав администратора.", show_alert=True)
+        return
+    
+    action = callback.data.replace("admin_", "")
+    
+    user = db.get_user(callback.from_user.id)
+    language = user.get('language_code', 'ru') if user else 'ru'
+    
+    if action == "stats":
+        # Показываем статистику
+        await cmd_stats_admin(callback.message)
+        
+    elif action == "users":
+        # Показываем пользователей
+        await cmd_users(callback.message)
+        
+    elif action == "broadcast":
+        # Запускаем рассылку
+        await cmd_broadcast(callback.message, state)
+        
+    elif action == "backup":
+        # Создаем бэкап
+        await cmd_backup(callback.message)
+        
+    elif action == "logs":
+        # Показываем логи (упрощенная версия)
+        try:
+            if os.path.exists(Config.LOG_FILE):
+                with open(Config.LOG_FILE, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()[-50:]  # Последние 50 строк
+                
+                log_text = "".join(lines[-20:])  # Показываем последние 20 строк
+                
+                if len(log_text) > 4000:
+                    log_text = log_text[-4000:]
+                
+                text = f"📋 *Последние логи:*\n```\n{log_text}\n```"
+                await callback.message.answer(text, parse_mode="Markdown")
+            else:
+                await callback.message.answer("📭 Файл логов не найден.")
+        except Exception as e:
+            await callback.message.answer(f"❌ Ошибка чтения логов: {e}")
+            
+    elif action == "cleanup":
+        # Очистка старых данных
+        builder = InlineKeyboardBuilder()
+        if language == 'ru':
+            builder.row(
+                InlineKeyboardButton(text="🗑️ Удалить старые напоминания", callback_data="cleanup_old"),
+                InlineKeyboardButton(text="🧹 Очистить логи", callback_data="cleanup_logs"),
+            )
+            builder.row(
+                InlineKeyboardButton(text="📋 Показать размер БД", callback_data="cleanup_stats"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"),
+            )
+        else:
+            builder.row(
+                InlineKeyboardButton(text="🗑️ Delete old reminders", callback_data="cleanup_old"),
+                InlineKeyboardButton(text="🧹 Clean logs", callback_data="cleanup_logs"),
+            )
+            builder.row(
+                InlineKeyboardButton(text="📋 Show DB size", callback_data="cleanup_stats"),
+                InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel"),
+            )
+        
+        text = {
+            'ru': "🧹 *Очистка данных*\n\nВыберите действие:",
+            'en': "🧹 *Data Cleanup*\n\nSelect action:"
+        }
+        
+        await callback.message.answer(
+            text.get(language, text['ru']),
+            parse_mode="Markdown",
+            reply_markup=builder.as_markup()
+        )
+        
+    elif action == "restart":
+        # Перезапуск проверки напоминаний
+        await callback.message.answer("🔄 Перезапускаю проверку напоминаний...")
+        await check_and_send_reminders()
+        await callback.message.answer("✅ Проверка напоминаний завершена.")
+        
+    elif action == "settings":
+        # Настройки
+        text = {
+            'ru': f"""⚙️ *Настройки бота*
+
+• Макс. напоминаний на пользователя: {Config.MAX_REMINDERS_PER_USER}
+• Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}
+• Уровень логов: {Config.LOG_LEVEL}
+• Проверка каждые: {Config.CHECK_INTERVAL_MINUTES} мин.
+• Режим отладки: {'ВКЛ' if Config.DEBUG else 'ВЫКЛ'}
+
+Команды для изменения:
+/set_limit <число> - изменить лимит
+/set_timezone <tz> - изменить часовой пояс
+/set_loglevel <level> - изменить уровень логов""",
+            'en': f"""⚙️ *Bot Settings*
+
+• Max reminders per user: {Config.MAX_REMINDERS_PER_USER}
+• Default timezone: {Config.DEFAULT_TIMEZONE}
+• Log level: {Config.LOG_LEVEL}
+• Check interval: {Config.CHECK_INTERVAL_MINUTES} min.
+• Debug mode: {'ON' if Config.DEBUG else 'OFF'}
+
+Commands to change:
+/set_limit <number> - change limit
+/set_timezone <tz> - change timezone
+/set_loglevel <level> - change log level"""
+        }
+        
+        await callback.message.answer(
+            text.get(language, text['ru']),
+            parse_mode="Markdown"
+        )
+        
+    elif action == "cancel":
+        await callback.message.delete()
+        
+    await callback.answer()
+
+@dp.message(Command("find_user"))
+async def cmd_find_user(message: types.Message):
+    """Найти пользователя по ID или имени"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("❌ Использование: /find_user <ID или имя>")
+        return
+    
+    search_term = args[1]
+    
+    try:
+        # Пробуем найти по ID
+        if search_term.isdigit():
+            user_id = int(search_term)
+            user = db.get_user(user_id)
+            
+            if user:
+                await show_user_info(message, user)
+                return
+        
+        # Ищем по имени или username
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM users 
+                WHERE username LIKE ? OR first_name LIKE ? OR last_name LIKE ?
+                LIMIT 10
+            ''', (f'%{search_term}%', f'%{search_term}%', f'%{search_term}%'))
+            
+            users = cursor.fetchall()
+            
+            if not users:
+                await message.answer(f"🔍 Пользователи по запросу '{search_term}' не найдены.")
+                return
+            
+            if len(users) == 1:
+                await show_user_info(message, dict(users[0]))
+            else:
+                text = f"🔍 *Найдено пользователей: {len(users)}*\n\n"
+                for i, user_row in enumerate(users, 1):
+                    user = dict(user_row)
+                    text += f"{i}. ID: {user['user_id']} - {user['first_name']} {user.get('last_name', '')}"
+                    if user['username']:
+                        text += f" (@{user['username']})"
+                    text += f"\n   Напоминаний: {user.get('reminder_count', 0)}\n\n"
+                
+                await message.answer(text, parse_mode="Markdown")
+                
+    except Exception as e:
+        logger.error(f"Error finding user: {e}")
+        await message.answer(f"❌ Ошибка поиска пользователя: {e}")
+
+async def show_user_info(message: types.Message, user: dict):
+    """Показать информацию о пользователе"""
+    user_id = user['user_id']
+    
+    # Получаем напоминания пользователя
+    reminders = db.get_user_reminders(user_id, active_only=True)
+    all_reminders = db.get_user_reminders(user_id, active_only=False)
+    
+    # Форматируем дату регистрации
+    reg_date = user['registered_at']
+    if isinstance(reg_date, str):
+        try:
+            reg_date = datetime.fromisoformat(reg_date)
+        except:
+            pass
+    
+    if isinstance(reg_date, datetime):
+        reg_str = reg_date.strftime("%d.%m.%Y %H:%M")
+    else:
+        reg_str = str(reg_date)
+    
+    text = f"""👤 *Информация о пользователе*
+
+*ID:* {user_id}
+*Имя:* {user['first_name']} {user.get('last_name', '')}
+*Username:* @{user['username'] if user['username'] else 'нет'}
+*Язык:* {user.get('language_code', 'ru')}
+*Часовой пояс:* {user.get('timezone', 'UTC')}
+
+*Статистика:*
+• Напоминаний всего: {len(all_reminders)}
+• Активных: {len(reminders)}
+• На паузе: {sum(1 for r in all_reminders if r.get('is_paused'))}
+• Выполнено: {len(all_reminders) - len(reminders)}
+
+*Регистрация:* {reg_str}
+*Последняя активность:* {user.get('last_active', 'неизвестно')}"""
+
+    # Кнопки действий
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📋 Напоминания пользователя", callback_data=f"user_reminders_{user_id}"),
+        InlineKeyboardButton(text="📢 Отправить сообщение", callback_data=f"user_message_{user_id}"),
+    )
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
 
 # ===== НОВАЯ ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЙ (время → текст → повторение) =====
 
