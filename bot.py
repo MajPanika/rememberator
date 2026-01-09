@@ -56,7 +56,26 @@ time_parser = TimeParser()
 
 def is_admin(user_id: int) -> bool:
     """Проверить, является ли пользователь админом"""
-    return user_id in Config.ADMINS or db.is_admin(user_id)
+    logger.debug(f"🔍 Проверка прав админа для user_id: {user_id}")
+    logger.debug(f"   Config.ADMINS: {Config.ADMINS}")
+    logger.debug(f"   user_id in Config.ADMINS: {user_id in Config.ADMINS}")
+    
+    # Проверяем в Config.ADMINS
+    if user_id in Config.ADMINS:
+        logger.info(f"✅ Пользователь {user_id} найден в Config.ADMINS")
+        # Добавляем в базу если еще нет
+        if not db.is_admin(user_id):
+            user = db.get_user(user_id)
+            username = user.get('username') if user else None
+            db.add_admin(user_id, username)
+            logger.info(f"✅ Пользователь {user_id} добавлен в таблицу admins")
+        return True
+    
+    # Проверяем в базе данных
+    is_admin_in_db = db.is_admin(user_id)
+    logger.debug(f"   db.is_admin({user_id}): {is_admin_in_db}")
+    
+    return is_admin_in_db
 
 async def admin_only(handler):
     """Декоратор для проверки прав админа"""
@@ -2904,15 +2923,27 @@ async def on_startup():
     logger.info("🤖 Bot is starting...")
     
     # Добавляем админов из конфига
+    logger.info(f"👑 Загружены админы из конфига: {Config.ADMINS}")
+    
     for admin_id in Config.ADMINS:
-        db.add_admin(admin_id, level=1)
-        logger.info(f"Added admin: {admin_id}")
+        try:
+            # Пробуем получить информацию о пользователе
+            user = db.get_user(admin_id)
+            username = user.get('username') if user else None
+            
+            db.add_admin(admin_id, username, level=1)
+            logger.info(f"✅ Добавлен админ из Config.ADMINS: {admin_id} (@{username})")
+            
+            # Если пользователя нет в users, добавляем
+            if not user:
+                logger.warning(f"⚠️ Админ {admin_id} не найден в таблице users")
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления админа {admin_id}: {e}")
     
     # Запускаем планировщик
     start_scheduler()
     
     logger.info("✅ Bot started successfully")
-
 async def on_shutdown():
     """Действия при выключении бота"""
     logger.info("🛑 Bot is shutting down...")
