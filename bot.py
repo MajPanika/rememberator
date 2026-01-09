@@ -424,7 +424,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 @dp.message(Command("today"))
 @dp.message(F.text.in_(["📅 На сегодня", "📅 For today"]))
 async def cmd_today(message: types.Message):
-    """Показать напоминания на сегодня - ПРОСТОЙ И ПРАВИЛЬНЫЙ ВАРИАНТ"""
+    """Показать напоминания на сегодня - С УЧЕТОМ ПОВТОРЯЮЩИХСЯ"""
     user_id = message.from_user.id
     user = db.get_user(user_id)
     
@@ -435,7 +435,6 @@ async def cmd_today(message: types.Message):
     language = user.get('language_code', 'ru')
     timezone = user.get('timezone', 'Europe/Moscow')
     
-    # Получаем ВСЕ напоминания пользователя
     reminders = db.get_user_reminders(user_id, active_only=True)
     
     if not reminders:
@@ -446,7 +445,6 @@ async def cmd_today(message: types.Message):
         await message.answer(empty_text.get(language, empty_text['ru']))
         return
     
-    # Получаем текущую дату в часовом поясе пользователя
     user_tz = pytz.timezone(timezone)
     now_utc = datetime.now(pytz.UTC)
     now_local = now_utc.astimezone(user_tz)
@@ -454,26 +452,28 @@ async def cmd_today(message: types.Message):
     today_reminders = []
     
     for reminder in reminders:
-        # Берем remind_time_utc КАК В /list
-        remind_time = reminder['remind_time_utc']
+        # ВАЖНОЕ ИЗМЕНЕНИЕ: для повторяющихся напоминаний используем next_remind_time_utc
+        if reminder['repeat_type'] != 'once':
+            # Для повторяющихся напоминаний используем следующее время
+            remind_time = reminder.get('next_remind_time_utc')
+            if remind_time is None:
+                # Если нет next_remind_time_utc, используем оригинальное
+                remind_time = reminder['remind_time_utc']
+        else:
+            # Для разовых используем оригинальное время
+            remind_time = reminder['remind_time_utc']
         
-        # Преобразуем строку в datetime если нужно (ТОЧНО КАК В /list)
+        # Обработка времени
         if isinstance(remind_time, str):
-            # В /list используется datetime.fromisoformat без обработки ошибок
             try:
                 remind_time = datetime.fromisoformat(remind_time)
             except:
-                # Если не ISO формат, пробуем другой
                 try:
                     remind_time = datetime.strptime(remind_time, '%Y-%m-%d %H:%M:%S')
                 except:
                     continue
         
-        # Используем функцию format_local_time КАК В /list
-        formatted_time = format_local_time(remind_time, timezone, language)
-        
-        # ПРОСТОЙ СПОСОБ: получаем дату из remind_time после конвертации
-        # Делаем время aware UTC
+        # Делаем aware UTC
         if remind_time.tzinfo is None:
             remind_time_utc = pytz.UTC.localize(remind_time)
         else:
@@ -482,9 +482,10 @@ async def cmd_today(message: types.Message):
         # Конвертируем в локальное время пользователя
         remind_time_local = remind_time_utc.astimezone(user_tz)
         
-        # Сравниваем даты
+        # Сравниваем с сегодняшней датой
         if remind_time_local.date() == now_local.date():
-            today_reminders.append((reminder, formatted_time))
+            formatted_time = format_local_time(remind_time, timezone, language)
+            today_reminders.append((reminder, formatted_time, remind_time_local))
     
     if not today_reminders:
         empty_text = {
@@ -494,6 +495,9 @@ async def cmd_today(message: types.Message):
         await message.answer(empty_text.get(language, empty_text['ru']))
         return
     
+    # Сортируем по времени
+    today_reminders.sort(key=lambda x: x[2])  # сортируем по remind_time_local
+    
     # Формируем заголовок
     if language == 'ru':
         date_str = now_local.strftime('%d.%m.%Y')
@@ -502,21 +506,31 @@ async def cmd_today(message: types.Message):
         date_str = now_local.strftime("%B %d, %Y")
         response_text = f"📅 *Reminders for today ({date_str}):*\n\n"
     
-    # Выводим КАК В /list (простой список)
-    for i, (reminder, formatted_time) in enumerate(today_reminders, 1):
-        # Тип повторения
+    # Выводим
+    for i, (reminder, formatted_time, _) in enumerate(today_reminders, 1):
         repeat_type = reminder['repeat_type']
         if repeat_type == 'once':
             repeat_symbol = "✅"
+            repeat_text = "разовое" if language == 'ru' else "one-time"
         elif repeat_type == 'daily':
             repeat_symbol = "🔄"
+            repeat_text = "ежедневное" if language == 'ru' else "daily"
         elif repeat_type == 'weekly':
             repeat_symbol = "📅"
+            repeat_text = "еженедельное" if language == 'ru' else "weekly"
         else:
             repeat_symbol = "📌"
+            repeat_text = ""
         
-        response_text += f"{i}. {repeat_symbol} *{formatted_time.split(',')[1].strip()}* - {reminder['text']}\n"
-        response_text += f"   🆔 ID: {reminder['id']}\n\n"
+        # Извлекаем только время из formatted_time
+        # formatted_time: "15 января 2024, 14:30" или "January 15, 2024, 2:30 PM"
+        if ',' in formatted_time:
+            time_part = formatted_time.split(',')[1].strip()
+        else:
+            time_part = formatted_time
+        
+        response_text += f"{i}. {repeat_symbol} *{time_part}* - {reminder['text']}\n"
+        response_text += f"   🆔 ID: {reminder['id']} ({repeat_text})\n\n"
     
     if language == 'ru':
         response_text += f"Всего: {len(today_reminders)} напоминаний"
@@ -524,11 +538,12 @@ async def cmd_today(message: types.Message):
         response_text += f"Total: {len(today_reminders)} reminders"
     
     await message.answer(response_text, parse_mode="Markdown")
-    
+
+
 @dp.message(Command("tomorrow"))
 @dp.message(F.text.in_(["📆 На завтра", "📆 For tomorrow"]))
 async def cmd_tomorrow(message: types.Message):
-    """Показать напоминания на завтра - ПРОСТОЙ И ПРАВИЛЬНЫЙ ВАРИАНТ"""
+    """Показать напоминания на завтра - С УЧЕТОМ ПОВТОРЯЮЩИХСЯ"""
     user_id = message.from_user.id
     user = db.get_user(user_id)
     
@@ -557,8 +572,18 @@ async def cmd_tomorrow(message: types.Message):
     tomorrow_reminders = []
     
     for reminder in reminders:
-        remind_time = reminder['remind_time_utc']
+        # ВАЖНОЕ ИЗМЕНЕНИЕ: для повторяющихся напоминаний используем next_remind_time_utc
+        if reminder['repeat_type'] != 'once':
+            # Для повторяющихся напоминаний используем следующее время
+            remind_time = reminder.get('next_remind_time_utc')
+            if remind_time is None:
+                # Если нет next_remind_time_utc, используем оригинальное
+                remind_time = reminder['remind_time_utc']
+        else:
+            # Для разовых используем оригинальное время
+            remind_time = reminder['remind_time_utc']
         
+        # Обработка времени
         if isinstance(remind_time, str):
             try:
                 remind_time = datetime.fromisoformat(remind_time)
@@ -577,10 +602,10 @@ async def cmd_tomorrow(message: types.Message):
         # Конвертируем в локальное время пользователя
         remind_time_local = remind_time_utc.astimezone(user_tz)
         
-        # Сравниваем с ЗАВТРАШНЕЙ датой
+        # Сравниваем с завтрашней датой
         if remind_time_local.date() == tomorrow_local.date():
             formatted_time = format_local_time(remind_time, timezone, language)
-            tomorrow_reminders.append((reminder, formatted_time))
+            tomorrow_reminders.append((reminder, formatted_time, remind_time_local))
     
     if not tomorrow_reminders:
         empty_text = {
@@ -589,6 +614,9 @@ async def cmd_tomorrow(message: types.Message):
         }
         await message.answer(empty_text.get(language, empty_text['ru']))
         return
+    
+    # Сортируем по времени
+    tomorrow_reminders.sort(key=lambda x: x[2])  # сортируем по remind_time_local
     
     # Форматируем дату завтра
     if language == 'ru':
@@ -602,19 +630,29 @@ async def cmd_tomorrow(message: types.Message):
         date_str = tomorrow_local.strftime("%B %d, %Y")
         response_text = f"📆 *Reminders for tomorrow ({date_str}):*\n\n"
     
-    for i, (reminder, formatted_time) in enumerate(tomorrow_reminders, 1):
+    for i, (reminder, formatted_time, _) in enumerate(tomorrow_reminders, 1):
         repeat_type = reminder['repeat_type']
         if repeat_type == 'once':
             repeat_symbol = "✅"
+            repeat_text = "разовое" if language == 'ru' else "one-time"
         elif repeat_type == 'daily':
             repeat_symbol = "🔄"
+            repeat_text = "ежедневное" if language == 'ru' else "daily"
         elif repeat_type == 'weekly':
             repeat_symbol = "📅"
+            repeat_text = "еженедельное" if language == 'ru' else "weekly"
         else:
             repeat_symbol = "📌"
+            repeat_text = ""
         
-        response_text += f"{i}. {repeat_symbol} *{formatted_time.split(',')[1].strip()}* - {reminder['text']}\n"
-        response_text += f"   🆔 ID: {reminder['id']}\n\n"
+        # Извлекаем только время из formatted_time
+        if ',' in formatted_time:
+            time_part = formatted_time.split(',')[1].strip()
+        else:
+            time_part = formatted_time
+        
+        response_text += f"{i}. {repeat_symbol} *{time_part}* - {reminder['text']}\n"
+        response_text += f"   🆔 ID: {reminder['id']} ({repeat_text})\n\n"
     
     if language == 'ru':
         response_text += f"Всего: {len(tomorrow_reminders)} напоминаний"
