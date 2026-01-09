@@ -1725,7 +1725,7 @@ async def cmd_admin(message: types.Message):
         reply_markup=builder.as_markup()
     )
 
-@dp.message(Command("stats"))
+@dp.message(Command("stat"))
 async def cmd_stats_admin(message: types.Message):
     """Статистика бота (админ)"""
     if not is_admin(message.from_user.id):
@@ -2094,6 +2094,36 @@ async def cmd_backup(message: types.Message):
     except Exception as e:
         logger.error(f"Error creating backup: {e}")
         await message.answer(f"❌ Ошибка создания резервной копии: {e}")
+
+@dp.message(Command("debug_admin"))
+async def cmd_debug_admin(message: types.Message):
+    """Отладочная команда для проверки админских прав"""
+    user_id = message.from_user.id
+    
+    debug_info = f"""
+🔍 *Отладка админских прав*
+
+ID: `{user_id}`
+ADMINS в конфиге: `{Config.ADMINS}`
+Вы в списке ADMINS: `{user_id in Config.ADMINS}`
+Функция is_admin возвращает: `{is_admin(user_id)}`
+    
+Проверьте .env файл, там должно быть:
+ADMINS={user_id}
+    """
+    
+    await message.answer(debug_info, parse_mode="Markdown")
+    
+    # Также проверьте таблицу admins
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM admins WHERE user_id = ?", (user_id,))
+        admin_row = cursor.fetchone()
+        
+        if admin_row:
+            await message.answer(f"✅ Найден в таблице admins: {dict(admin_row)}")
+        else:
+            await message.answer("❌ Не найден в таблице admins")
 
 @dp.callback_query(F.data.startswith("admin_"))
 async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext):
