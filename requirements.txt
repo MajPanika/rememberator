@@ -6,3 +6,4 @@ python-dateutil==2.9.0.post0
 dateparser==1.2.0
 aiofiles==23.2.1
 pytz-data==2020.1
+psutil
