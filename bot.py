@@ -58,7 +58,6 @@ def is_admin(user_id: int) -> bool:
     """Проверить, является ли пользователь админом"""
     logger.debug(f"🔍 Проверка прав админа для user_id: {user_id}")
     logger.debug(f"   Config.ADMINS: {Config.ADMINS}")
-    logger.debug(f"   user_id in Config.ADMINS: {user_id in Config.ADMINS}")
     
     # Проверяем в Config.ADMINS
     if user_id in Config.ADMINS:
@@ -80,9 +79,14 @@ def is_admin(user_id: int) -> bool:
 async def admin_only(handler):
     """Декоратор для проверки прав админа"""
     async def wrapper(message: types.Message, *args, **kwargs):
-        if not is_admin(message.from_user.id):
+        user_id = message.from_user.id
+        logger.debug(f"🔍 Проверка прав админа через декоратор для user_id: {user_id}")
+        
+        if not is_admin(user_id):
+            logger.warning(f"⛔ Пользователь {user_id} не админ, пытался использовать админ-команду")
             await message.answer("⛔ У вас нет прав администратора.")
             return
+        logger.debug(f"✅ Пользователь {user_id} прошел проверку админских прав")
         return await handler(message, *args, **kwargs)
     return wrapper
 
@@ -1837,10 +1841,21 @@ async def cmd_users(message: types.Message):
         user = db.get_user(message.from_user.id)
         language = user.get('language_code', 'ru') if user else 'ru'
         
+        # Формируем текст БЕЗ Markdown разметки
         if language == 'ru':
-            text = f"👥 *Последние 20 пользователей (всего: {len(users)}):*\n\n"
+            text = f"👥 Последние 20 пользователей (всего: {len(users)}):\n\n"
             for i, user_data in enumerate(users, 1):
-                username = f"@{user_data['username']}" if user_data['username'] else "без username"
+                username = user_data.get('username', '')
+                username_display = f"@{username}" if username else "без username"
+                
+                # Экранируем специальные символы
+                first_name = user_data.get('first_name', '')
+                first_name = first_name.replace('*', '•').replace('_', ' ')
+                
+                last_name = user_data.get('last_name', '')
+                if last_name:
+                    last_name = last_name.replace('*', '•').replace('_', ' ')
+                
                 reg_date = user_data['registered_at']
                 if isinstance(reg_date, str):
                     try:
@@ -1853,17 +1868,27 @@ async def cmd_users(message: types.Message):
                 else:
                     reg_str = str(reg_date)[:10]
                 
-                text += f"{i}. *ID:* {user_data['user_id']}\n"
-                text += f"   👤 {user_data['first_name']} {user_data.get('last_name', '')}\n"
-                text += f"   📱 {username}\n"
+                text += f"{i}. ID: {user_data['user_id']}\n"
+                text += f"   👤 {first_name} {last_name}\n"
+                text += f"   📱 {username_display}\n"
                 text += f"   🌐 {user_data.get('language_code', 'ru')}\n"
                 text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
                 text += f"   📅 Регистрация: {reg_str}\n"
                 text += f"   🔔 Напоминаний: {user_data.get('reminder_count', 0)}\n\n"
         else:
-            text = f"👥 *Last 20 users (total: {len(users)}):*\n\n"
+            text = f"👥 Last 20 users (total: {len(users)}):\n\n"
             for i, user_data in enumerate(users, 1):
-                username = f"@{user_data['username']}" if user_data['username'] else "no username"
+                username = user_data.get('username', '')
+                username_display = f"@{username}" if username else "no username"
+                
+                # Экранируем специальные символы
+                first_name = user_data.get('first_name', '')
+                first_name = first_name.replace('*', '•').replace('_', ' ')
+                
+                last_name = user_data.get('last_name', '')
+                if last_name:
+                    last_name = last_name.replace('*', '•').replace('_', ' ')
+                
                 reg_date = user_data['registered_at']
                 if isinstance(reg_date, str):
                     try:
@@ -1876,37 +1901,19 @@ async def cmd_users(message: types.Message):
                 else:
                     reg_str = str(reg_date)[:10]
                 
-                text += f"{i}. *ID:* {user_data['user_id']}\n"
-                text += f"   👤 {user_data['first_name']} {user_data.get('last_name', '')}\n"
-                text += f"   📱 {username}\n"
+                text += f"{i}. ID: {user_data['user_id']}\n"
+                text += f"   👤 {first_name} {last_name}\n"
+                text += f"   📱 {username_display}\n"
                 text += f"   🌐 {user_data.get('language_code', 'en')}\n"
                 text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
                 text += f"   📅 Registered: {reg_str}\n"
                 text += f"   🔔 Reminders: {user_data.get('reminder_count', 0)}\n\n"
         
-        # Добавляем кнопки навигации
-        builder = InlineKeyboardBuilder()
-        if language == 'ru':
-            builder.row(
-                InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-                InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
-            )
-            builder.row(
-                InlineKeyboardButton(text="🔍 Поиск пользователя", callback_data="admin_find_user"),
-            )
-        else:
-            builder.row(
-                InlineKeyboardButton(text="📊 Statistics", callback_data="admin_stats"),
-                InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"),
-            )
-            builder.row(
-                InlineKeyboardButton(text="🔍 Find User", callback_data="admin_find_user"),
-            )
-        
-        await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+        # Отправляем как обычный текст (без Markdown парсинга)
+        await message.answer(text)
         
     except Exception as e:
-        logger.error(f"Error getting users: {e}")
+        logger.error(f"Error getting users: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка получения списка пользователей: {e}")
 
 # Состояния для рассылки
@@ -2130,33 +2137,47 @@ ADMINS={user_id}
 @dp.callback_query(F.data.startswith("admin_"))
 async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext):
     """Обработка кнопок админ-панели"""
-    if not is_admin(callback.from_user.id):
+    user_id = callback.from_user.id
+    logger.debug(f"🔍 Проверка админских прав для кнопки: user_id={user_id}, data={callback.data}")
+    
+    if not is_admin(user_id):
+        logger.warning(f"⛔ Пользователь {user_id} не админ, но пытается использовать админ-кнопку")
         await callback.answer("⛔ Нет прав администратора.", show_alert=True)
         return
     
     action = callback.data.replace("admin_", "")
+    logger.debug(f"✅ Обработка админ-кнопки: {action} для user_id={user_id}")
     
-    user = db.get_user(callback.from_user.id)
+    user = db.get_user(user_id)
     language = user.get('language_code', 'ru') if user else 'ru'
     
     if action == "stats":
-        # Показываем статистику
-        await cmd_stats_admin(callback.message)
+        # Показываем админскую статистику (команда stat)
+        logger.info(f"📊 Админ {user_id} запросил статистику через кнопку")
+        await cmd_stat(callback.message)
+        await callback.answer()
         
     elif action == "users":
         # Показываем пользователей
+        logger.info(f"👥 Админ {user_id} запросил список пользователей через кнопку")
         await cmd_users(callback.message)
+        await callback.answer()
         
     elif action == "broadcast":
         # Запускаем рассылку
+        logger.info(f"📢 Админ {user_id} запустил рассылку через кнопку")
         await cmd_broadcast(callback.message, state)
+        await callback.answer()
         
     elif action == "backup":
         # Создаем бэкап
+        logger.info(f"💾 Админ {user_id} создал бэкап через кнопку")
         await cmd_backup(callback.message)
+        await callback.answer()
         
     elif action == "logs":
         # Показываем логи (упрощенная версия)
+        logger.info(f"📋 Админ {user_id} запросил логи через кнопку")
         try:
             if os.path.exists(Config.LOG_FILE):
                 with open(Config.LOG_FILE, 'r', encoding='utf-8') as f:
@@ -2167,15 +2188,17 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
                 if len(log_text) > 4000:
                     log_text = log_text[-4000:]
                 
-                text = f"📋 *Последние логи:*\n```\n{log_text}\n```"
-                await callback.message.answer(text, parse_mode="Markdown")
+                text = f"📋 Последние логи:\n```\n{log_text}\n```"
+                await callback.message.answer(text)
             else:
                 await callback.message.answer("📭 Файл логов не найден.")
         except Exception as e:
             await callback.message.answer(f"❌ Ошибка чтения логов: {e}")
+        await callback.answer()
             
     elif action == "cleanup":
         # Очистка старых данных
+        logger.info(f"🧹 Админ {user_id} открыл меню очистки через кнопку")
         builder = InlineKeyboardBuilder()
         if language == 'ru':
             builder.row(
@@ -2197,26 +2220,29 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
             )
         
         text = {
-            'ru': "🧹 *Очистка данных*\n\nВыберите действие:",
-            'en': "🧹 *Data Cleanup*\n\nSelect action:"
+            'ru': "🧹 Очистка данных\n\nВыберите действие:",
+            'en': "🧹 Data Cleanup\n\nSelect action:"
         }
         
-        await callback.message.answer(
+        await callback.message.edit_text(
             text.get(language, text['ru']),
-            parse_mode="Markdown",
             reply_markup=builder.as_markup()
         )
+        await callback.answer()
         
     elif action == "restart":
         # Перезапуск проверки напоминаний
+        logger.info(f"🔄 Админ {user_id} перезапустил проверку напоминаний через кнопку")
         await callback.message.answer("🔄 Перезапускаю проверку напоминаний...")
         await check_and_send_reminders()
         await callback.message.answer("✅ Проверка напоминаний завершена.")
+        await callback.answer()
         
     elif action == "settings":
         # Настройки
+        logger.info(f"⚙️ Админ {user_id} запросил настройки через кнопку")
         text = {
-            'ru': f"""⚙️ *Настройки бота*
+            'ru': f"""⚙️ Настройки бота
 
 • Макс. напоминаний на пользователя: {Config.MAX_REMINDERS_PER_USER}
 • Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}
@@ -2228,7 +2254,7 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
 /set_limit <число> - изменить лимит
 /set_timezone <tz> - изменить часовой пояс
 /set_loglevel <level> - изменить уровень логов""",
-            'en': f"""⚙️ *Bot Settings*
+            'en': f"""⚙️ Bot Settings
 
 • Max reminders per user: {Config.MAX_REMINDERS_PER_USER}
 • Default timezone: {Config.DEFAULT_TIMEZONE}
@@ -2243,14 +2269,13 @@ Commands to change:
         }
         
         await callback.message.answer(
-            text.get(language, text['ru']),
-            parse_mode="Markdown"
+            text.get(language, text['ru'])
         )
+        await callback.answer()
         
     elif action == "cancel":
         await callback.message.delete()
-        
-    await callback.answer()
+        await callback.answer()
 
 @dp.message(Command("find_user"))
 async def cmd_find_user(message: types.Message):
