@@ -1730,10 +1730,15 @@ async def cmd_admin(message: types.Message):
     )
 
 @dp.message(Command("stat"))
-async def cmd_stats_admin(message: types.Message):
-    """Статистика бота (админ)"""
-    if not is_admin(message.from_user.id):
-        await cmd_stats(message)  # Показываем обычную статистику
+async def cmd_stat(message: types.Message):
+    """Статистика бота (админская)"""
+    user_id = message.from_user.id
+    logger.info(f"📊 Запрос админской статистики от user_id={user_id}")
+    
+    # Проверяем права админа вручную
+    if not is_admin(user_id):
+        logger.warning(f"⛔ Пользователь {user_id} не админ, пытался получить админскую статистику")
+        await message.answer("⛔ У вас нет прав администратора.")
         return
     
     try:
@@ -1751,11 +1756,11 @@ async def cmd_stats_admin(message: types.Message):
         
         # Время работы бота
         import time
-        start_time = getattr(cmd_stats_admin, '_start_time', time.time())
+        start_time = getattr(cmd_stat, '_start_time', time.time())
         uptime_seconds = time.time() - start_time
         uptime_str = str(timedelta(seconds=int(uptime_seconds)))
         
-        user = db.get_user(message.from_user.id)
+        user = db.get_user(user_id)
         language = user.get('language_code', 'ru') if user else 'ru'
         
         if language == 'ru':
@@ -1810,28 +1815,26 @@ async def cmd_stats_admin(message: types.Message):
         await message.answer(stats_text, parse_mode="Markdown")
         
     except Exception as e:
-        logger.error(f"Error in admin stats: {e}")
+        logger.error(f"Error in admin stats: {e}", exc_info=True)
         error_text = {
             'ru': f"❌ Ошибка получения статистики: {e}",
             'en': f"❌ Error getting statistics: {e}"
         }
-        user = db.get_user(message.from_user.id)
+        user = db.get_user(user_id)
         language = user.get('language_code', 'ru') if user else 'ru'
         await message.answer(error_text.get(language, error_text['ru']))
 
 # Сохраняем время запуска для статистики
 import time
-cmd_stats_admin._start_time = time.time()
+cmd_stat._start_time = time.time()
 
 @dp.message(Command("users"))
 async def cmd_users(message: types.Message):
     """Список пользователей"""
-    logger.info(f"📋 Запрос списка пользователей от user_id={message.from_user.id}")
+    user_id = message.from_user.id
+    logger.info(f"📋 Запрос списка пользователей от user_id={user_id}")
     
-    if not is_admin(message.from_user.id):
-        logger.warning(f"⛔ Пользователь {message.from_user.id} не админ, пытался получить список пользователей")
-        await message.answer("⛔ У вас нет прав администратора.")
-        return
+    # ПРОВЕРКА УБРАНА - ее делает обработчик кнопки или вызывающий код
     
     try:
         # Получаем пользователей
@@ -1841,7 +1844,7 @@ async def cmd_users(message: types.Message):
             await message.answer("📭 Нет пользователей в базе данных.")
             return
         
-        user = db.get_user(message.from_user.id)
+        user = db.get_user(user_id)
         language = user.get('language_code', 'ru') if user else 'ru'
         
         # Формируем текст БЕЗ Markdown разметки
@@ -2140,7 +2143,7 @@ ADMINS={user_id}
 @dp.callback_query(F.data.startswith("admin_"))
 async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext):
     """Обработка кнопок админ-панели"""
-    user_id = callback.from_user.id
+    user_id = callback.from_user.id  # Это ID пользователя, который нажал кнопку
     logger.debug(f"🔍 Проверка админских прав для кнопки: user_id={user_id}, data={callback.data}")
     
     # Сразу отвечаем на callback, чтобы Telegram не показывал "часики"
@@ -2162,22 +2165,58 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
         if action == "stats":
             # Показываем админскую статистику (команда stat)
             logger.info(f"📊 Админ {user_id} запросил статистику через кнопку")
-            await cmd_stat(callback.message)
+            # Создаем фиктивное сообщение с правильным user_id
+            from aiogram.types import Message
+            fake_message = Message(
+                message_id=callback.message.message_id,
+                date=callback.message.date,
+                chat=callback.message.chat,
+                from_user=callback.from_user,  # Это важно! Используем реального пользователя
+                text="/stat"
+            )
+            await cmd_stat(fake_message)
             
         elif action == "users":
             # Показываем пользователей
             logger.info(f"👥 Админ {user_id} запросил список пользователей через кнопку")
-            await cmd_users(callback.message)
+            # Создаем фиктивное сообщение с правильным user_id
+            from aiogram.types import Message
+            fake_message = Message(
+                message_id=callback.message.message_id,
+                date=callback.message.date,
+                chat=callback.message.chat,
+                from_user=callback.from_user,  # Это важно! Используем реального пользователя
+                text="/users"
+            )
+            await cmd_users(fake_message)
             
         elif action == "broadcast":
             # Запускаем рассылку
             logger.info(f"📢 Админ {user_id} запустил рассылку через кнопку")
-            await cmd_broadcast(callback.message, state)
+            # Создаем фиктивное сообщение с правильным user_id
+            from aiogram.types import Message
+            fake_message = Message(
+                message_id=callback.message.message_id,
+                date=callback.message.date,
+                chat=callback.message.chat,
+                from_user=callback.from_user,
+                text="/broadcast"
+            )
+            await cmd_broadcast(fake_message, state)
             
         elif action == "backup":
             # Создаем бэкап
             logger.info(f"💾 Админ {user_id} создал бэкап через кнопку")
-            await cmd_backup(callback.message)
+            # Создаем фиктивное сообщение с правильным user_id
+            from aiogram.types import Message
+            fake_message = Message(
+                message_id=callback.message.message_id,
+                date=callback.message.date,
+                chat=callback.message.chat,
+                from_user=callback.from_user,
+                text="/backup"
+            )
+            await cmd_backup(fake_message)
             
         elif action == "logs":
             # Показываем логи (упрощенная версия)
