@@ -2140,8 +2140,12 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
     user_id = callback.from_user.id
     logger.debug(f"🔍 Проверка админских прав для кнопки: user_id={user_id}, data={callback.data}")
     
+    # Сразу отвечаем на callback, чтобы Telegram не показывал "часики"
+    await callback.answer()
+    
     if not is_admin(user_id):
         logger.warning(f"⛔ Пользователь {user_id} не админ, но пытается использовать админ-кнопку")
+        # Ответ уже был отправлен выше, но можно отправить всплывающее сообщение
         await callback.answer("⛔ Нет прав администратора.", show_alert=True)
         return
     
@@ -2151,98 +2155,92 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
     user = db.get_user(user_id)
     language = user.get('language_code', 'ru') if user else 'ru'
     
-    if action == "stats":
-        # Показываем админскую статистику (команда stat)
-        logger.info(f"📊 Админ {user_id} запросил статистику через кнопку")
-        await cmd_stat(callback.message)
-        await callback.answer()
-        
-    elif action == "users":
-        # Показываем пользователей
-        logger.info(f"👥 Админ {user_id} запросил список пользователей через кнопку")
-        await cmd_users(callback.message)
-        await callback.answer()
-        
-    elif action == "broadcast":
-        # Запускаем рассылку
-        logger.info(f"📢 Админ {user_id} запустил рассылку через кнопку")
-        await cmd_broadcast(callback.message, state)
-        await callback.answer()
-        
-    elif action == "backup":
-        # Создаем бэкап
-        logger.info(f"💾 Админ {user_id} создал бэкап через кнопку")
-        await cmd_backup(callback.message)
-        await callback.answer()
-        
-    elif action == "logs":
-        # Показываем логи (упрощенная версия)
-        logger.info(f"📋 Админ {user_id} запросил логи через кнопку")
-        try:
-            if os.path.exists(Config.LOG_FILE):
-                with open(Config.LOG_FILE, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()[-50:]  # Последние 50 строк
-                
-                log_text = "".join(lines[-20:])  # Показываем последние 20 строк
-                
-                if len(log_text) > 4000:
-                    log_text = log_text[-4000:]
-                
-                text = f"📋 Последние логи:\n```\n{log_text}\n```"
-                await callback.message.answer(text)
-            else:
-                await callback.message.answer("📭 Файл логов не найден.")
-        except Exception as e:
-            await callback.message.answer(f"❌ Ошибка чтения логов: {e}")
-        await callback.answer()
+    try:
+        if action == "stats":
+            # Показываем админскую статистику (команда stat)
+            logger.info(f"📊 Админ {user_id} запросил статистику через кнопку")
+            await cmd_stat(callback.message)
             
-    elif action == "cleanup":
-        # Очистка старых данных
-        logger.info(f"🧹 Админ {user_id} открыл меню очистки через кнопку")
-        builder = InlineKeyboardBuilder()
-        if language == 'ru':
-            builder.row(
-                InlineKeyboardButton(text="🗑️ Удалить старые напоминания", callback_data="cleanup_old"),
-                InlineKeyboardButton(text="🧹 Очистить логи", callback_data="cleanup_logs"),
+        elif action == "users":
+            # Показываем пользователей
+            logger.info(f"👥 Админ {user_id} запросил список пользователей через кнопку")
+            await cmd_users(callback.message)
+            
+        elif action == "broadcast":
+            # Запускаем рассылку
+            logger.info(f"📢 Админ {user_id} запустил рассылку через кнопку")
+            await cmd_broadcast(callback.message, state)
+            
+        elif action == "backup":
+            # Создаем бэкап
+            logger.info(f"💾 Админ {user_id} создал бэкап через кнопку")
+            await cmd_backup(callback.message)
+            
+        elif action == "logs":
+            # Показываем логи (упрощенная версия)
+            logger.info(f"📋 Админ {user_id} запросил логи через кнопку")
+            try:
+                if os.path.exists(Config.LOG_FILE):
+                    with open(Config.LOG_FILE, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()[-50:]  # Последние 50 строк
+                    
+                    log_text = "".join(lines[-20:])  # Показываем последние 20 строк
+                    
+                    if len(log_text) > 4000:
+                        log_text = log_text[-4000:]
+                    
+                    text = f"📋 Последние логи:\n```\n{log_text}\n```"
+                    await callback.message.answer(text)
+                else:
+                    await callback.message.answer("📭 Файл логов не найден.")
+            except Exception as e:
+                await callback.message.answer(f"❌ Ошибка чтения логов: {e}")
+                
+        elif action == "cleanup":
+            # Очистка старых данных
+            logger.info(f"🧹 Админ {user_id} открыл меню очистки через кнопку")
+            builder = InlineKeyboardBuilder()
+            if language == 'ru':
+                builder.row(
+                    InlineKeyboardButton(text="🗑️ Удалить старые напоминания", callback_data="cleanup_old"),
+                    InlineKeyboardButton(text="🧹 Очистить логи", callback_data="cleanup_logs"),
+                )
+                builder.row(
+                    InlineKeyboardButton(text="📋 Показать размер БД", callback_data="cleanup_stats"),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"),
+                )
+            else:
+                builder.row(
+                    InlineKeyboardButton(text="🗑️ Delete old reminders", callback_data="cleanup_old"),
+                    InlineKeyboardButton(text="🧹 Clean logs", callback_data="cleanup_logs"),
+                )
+                builder.row(
+                    InlineKeyboardButton(text="📋 Show DB size", callback_data="cleanup_stats"),
+                    InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel"),
+                )
+            
+            text = {
+                'ru': "🧹 Очистка данных\n\nВыберите действие:",
+                'en': "🧹 Data Cleanup\n\nSelect action:"
+            }
+            
+            await callback.message.edit_text(
+                text.get(language, text['ru']),
+                reply_markup=builder.as_markup()
             )
-            builder.row(
-                InlineKeyboardButton(text="📋 Показать размер БД", callback_data="cleanup_stats"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"),
-            )
-        else:
-            builder.row(
-                InlineKeyboardButton(text="🗑️ Delete old reminders", callback_data="cleanup_old"),
-                InlineKeyboardButton(text="🧹 Clean logs", callback_data="cleanup_logs"),
-            )
-            builder.row(
-                InlineKeyboardButton(text="📋 Show DB size", callback_data="cleanup_stats"),
-                InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel"),
-            )
-        
-        text = {
-            'ru': "🧹 Очистка данных\n\nВыберите действие:",
-            'en': "🧹 Data Cleanup\n\nSelect action:"
-        }
-        
-        await callback.message.edit_text(
-            text.get(language, text['ru']),
-            reply_markup=builder.as_markup()
-        )
-        await callback.answer()
-        
-    elif action == "restart":
-        # Перезапуск проверки напоминаний
-        logger.info(f"🔄 Админ {user_id} перезапустил проверку напоминаний через кнопку")
-        await callback.message.answer("🔄 Перезапускаю проверку напоминаний...")
-        await check_and_send_reminders()
-        await callback.message.answer("✅ Проверка напоминаний завершена.")
-        await callback.answer()
-        
-    elif action == "settings":
-        # Настройки
-        logger.info(f"⚙️ Админ {user_id} запросил настройки через кнопку")
-        text = {
-            'ru': f"""⚙️ Настройки бота
+            
+        elif action == "restart":
+            # Перезапуск проверки напоминаний
+            logger.info(f"🔄 Админ {user_id} перезапустил проверку напоминаний через кнопку")
+            await callback.message.answer("🔄 Перезапускаю проверку напоминаний...")
+            await check_and_send_reminders()
+            await callback.message.answer("✅ Проверка напоминаний завершена.")
+            
+        elif action == "settings":
+            # Настройки
+            logger.info(f"⚙️ Админ {user_id} запросил настройки через кнопку")
+            text = {
+                'ru': f"""⚙️ Настройки бота
 
 • Макс. напоминаний на пользователя: {Config.MAX_REMINDERS_PER_USER}
 • Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}
@@ -2254,7 +2252,7 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
 /set_limit <число> - изменить лимит
 /set_timezone <tz> - изменить часовой пояс
 /set_loglevel <level> - изменить уровень логов""",
-            'en': f"""⚙️ Bot Settings
+                'en': f"""⚙️ Bot Settings
 
 • Max reminders per user: {Config.MAX_REMINDERS_PER_USER}
 • Default timezone: {Config.DEFAULT_TIMEZONE}
@@ -2266,16 +2264,18 @@ Commands to change:
 /set_limit <number> - change limit
 /set_timezone <tz> - change timezone
 /set_loglevel <level> - change log level"""
-        }
-        
-        await callback.message.answer(
-            text.get(language, text['ru'])
-        )
-        await callback.answer()
-        
-    elif action == "cancel":
-        await callback.message.delete()
-        await callback.answer()
+            }
+            
+            await callback.message.answer(
+                text.get(language, text['ru'])
+            )
+            
+        elif action == "cancel":
+            await callback.message.delete()
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки админ-кнопки {action}: {e}", exc_info=True)
+        await callback.message.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Command("find_user"))
 async def cmd_find_user(message: types.Message):
