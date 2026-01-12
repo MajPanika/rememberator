@@ -1741,92 +1741,7 @@ async def cmd_stat(message: types.Message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
     
-    try:
-        # Получаем статистику из БД
-        stats = db.get_bot_statistics()
-        
-        # Получаем системную информацию
-        import psutil
-        import platform
-        from datetime import datetime
-        
-        # Использование памяти
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        
-        # Время работы бота
-        import time
-        start_time = getattr(cmd_stat, '_start_time', time.time())
-        uptime_seconds = time.time() - start_time
-        uptime_str = str(timedelta(seconds=int(uptime_seconds)))
-        
-        user = db.get_user(user_id)
-        language = user.get('language_code', 'ru') if user else 'ru'
-        
-        if language == 'ru':
-            stats_text = f"""📊 *Статистика бота (Админ)*
-
-👥 *Пользователи:*
-• Всего: {stats.get('total_users', 0)}
-• Активных за неделю: {stats.get('active_week', 0)}
-• Новых сегодня: {stats.get('new_today', 0)}
-
-🔔 *Напоминания:*
-• Всего: {stats.get('total_reminders', 0)}
-• Активных: {stats.get('active_reminders', 0)}
-• Повторяющихся: {stats.get('repeating_reminders', 0)}
-• На паузе: {stats.get('paused_reminders', 0)}
-• Создано сегодня: {stats.get('created_today', 0)}
-
-💻 *Система:*
-• Время работы: {uptime_str}
-• Память: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)
-• Диск: {disk.percent}% ({disk.used//1024//1024}MB/{disk.total//1024//1024}MB)
-• ОС: {platform.system()} {platform.release()}
-
-📈 *Лимиты:*
-• Макс. напоминаний: {Config.MAX_REMINDERS_PER_USER}
-• Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}"""
-        else:
-            stats_text = f"""📊 *Bot Statistics (Admin)*
-
-👥 *Users:*
-• Total: {stats.get('total_users', 0)}
-• Active this week: {stats.get('active_week', 0)}
-• New today: {stats.get('new_today', 0)}
-
-🔔 *Reminders:*
-• Total: {stats.get('total_reminders', 0)}
-• Active: {stats.get('active_reminders', 0)}
-• Repeating: {stats.get('repeating_reminders', 0)}
-• Paused: {stats.get('paused_reminders', 0)}
-• Created today: {stats.get('created_today', 0)}
-
-💻 *System:*
-• Uptime: {uptime_str}
-• Memory: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)
-• Disk: {disk.percent}% ({disk.used//1024//1024}MB/{disk.total//1024//1024}MB)
-• OS: {platform.system()} {platform.release()}
-
-📈 *Limits:*
-• Max reminders: {Config.MAX_REMINDERS_PER_USER}
-• Default timezone: {Config.DEFAULT_TIMEZONE}"""
-        
-        await message.answer(stats_text, parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"Error in admin stats: {e}", exc_info=True)
-        error_text = {
-            'ru': f"❌ Ошибка получения статистики: {e}",
-            'en': f"❌ Error getting statistics: {e}"
-        }
-        user = db.get_user(user_id)
-        language = user.get('language_code', 'ru') if user else 'ru'
-        await message.answer(error_text.get(language, error_text['ru']))
-
-# Сохраняем время запуска для статистики
-import time
-cmd_stat._start_time = time.time()
+    await send_admin_stats(user_id, message.chat.id)
 
 @dp.message(Command("users"))
 async def cmd_users(message: types.Message):
@@ -1834,93 +1749,17 @@ async def cmd_users(message: types.Message):
     user_id = message.from_user.id
     logger.info(f"📋 Запрос списка пользователей от user_id={user_id}")
     
-    # ПРОВЕРКА УБРАНА - ее делает обработчик кнопки или вызывающий код
+    # Проверяем права админа вручную
+    if not is_admin(user_id):
+        logger.warning(f"⛔ Пользователь {user_id} не админ, пытался получить список пользователей")
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
     
-    try:
-        # Получаем пользователей
-        users = db.get_all_users(limit=20)
-        
-        if not users:
-            await message.answer("📭 Нет пользователей в базе данных.")
-            return
-        
-        user = db.get_user(user_id)
-        language = user.get('language_code', 'ru') if user else 'ru'
-        
-        # Формируем текст БЕЗ Markdown разметки
-        if language == 'ru':
-            text = f"👥 Последние 20 пользователей (всего: {len(users)}):\n\n"
-            for i, user_data in enumerate(users, 1):
-                username = user_data.get('username', '')
-                username_display = f"@{username}" if username else "без username"
-                
-                # Экранируем специальные символы
-                first_name = user_data.get('first_name', '')
-                first_name = first_name.replace('*', '•').replace('_', ' ')
-                
-                last_name = user_data.get('last_name', '')
-                if last_name:
-                    last_name = last_name.replace('*', '•').replace('_', ' ')
-                
-                reg_date = user_data['registered_at']
-                if isinstance(reg_date, str):
-                    try:
-                        reg_date = datetime.fromisoformat(reg_date)
-                    except:
-                        pass
-                
-                if isinstance(reg_date, datetime):
-                    reg_str = reg_date.strftime("%d.%m.%Y")
-                else:
-                    reg_str = str(reg_date)[:10]
-                
-                text += f"{i}. ID: {user_data['user_id']}\n"
-                text += f"   👤 {first_name} {last_name}\n"
-                text += f"   📱 {username_display}\n"
-                text += f"   🌐 {user_data.get('language_code', 'ru')}\n"
-                text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
-                text += f"   📅 Регистрация: {reg_str}\n"
-                text += f"   🔔 Напоминаний: {user_data.get('reminder_count', 0)}\n\n"
-        else:
-            text = f"👥 Last 20 users (total: {len(users)}):\n\n"
-            for i, user_data in enumerate(users, 1):
-                username = user_data.get('username', '')
-                username_display = f"@{username}" if username else "no username"
-                
-                # Экранируем специальные символы
-                first_name = user_data.get('first_name', '')
-                first_name = first_name.replace('*', '•').replace('_', ' ')
-                
-                last_name = user_data.get('last_name', '')
-                if last_name:
-                    last_name = last_name.replace('*', '•').replace('_', ' ')
-                
-                reg_date = user_data['registered_at']
-                if isinstance(reg_date, str):
-                    try:
-                        reg_date = datetime.fromisoformat(reg_date)
-                    except:
-                        pass
-                
-                if isinstance(reg_date, datetime):
-                    reg_str = reg_date.strftime("%b %d, %Y")
-                else:
-                    reg_str = str(reg_date)[:10]
-                
-                text += f"{i}. ID: {user_data['user_id']}\n"
-                text += f"   👤 {first_name} {last_name}\n"
-                text += f"   📱 {username_display}\n"
-                text += f"   🌐 {user_data.get('language_code', 'en')}\n"
-                text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
-                text += f"   📅 Registered: {reg_str}\n"
-                text += f"   🔔 Reminders: {user_data.get('reminder_count', 0)}\n\n"
-        
-        # Отправляем как обычный текст (без Markdown парсинга)
-        await message.answer(text)
-        
-    except Exception as e:
-        logger.error(f"Error getting users: {e}", exc_info=True)
-        await message.answer(f"❌ Ошибка получения списка пользователей: {e}")
+    await send_users_list(user_id, message.chat.id)
+    
+# Сохраняем время запуска для статистики
+import time
+cmd_stat._start_time = time.time()
 
 # Состояния для рассылки
 class BroadcastState(StatesGroup):
@@ -2143,7 +1982,7 @@ ADMINS={user_id}
 @dp.callback_query(F.data.startswith("admin_"))
 async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext):
     """Обработка кнопок админ-панели"""
-    user_id = callback.from_user.id  # Это ID пользователя, который нажал кнопку
+    user_id = callback.from_user.id
     logger.debug(f"🔍 Проверка админских прав для кнопки: user_id={user_id}, data={callback.data}")
     
     # Сразу отвечаем на callback, чтобы Telegram не показывал "часики"
@@ -2165,124 +2004,320 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
         if action == "stats":
             # Показываем админскую статистику (команда stat)
             logger.info(f"📊 Админ {user_id} запросил статистику через кнопку")
-            # Создаем фиктивное сообщение с правильным user_id
-            from aiogram.types import Message
-            fake_message = Message(
-                message_id=callback.message.message_id,
-                date=callback.message.date,
-                chat=callback.message.chat,
-                from_user=callback.from_user,  # Это важно! Используем реального пользователя
-                text="/stat"
-            )
-            await cmd_stat(fake_message)
+            await send_admin_stats(user_id, callback.message.chat.id)
             
         elif action == "users":
             # Показываем пользователей
             logger.info(f"👥 Админ {user_id} запросил список пользователей через кнопку")
-            # Создаем фиктивное сообщение с правильным user_id
-            from aiogram.types import Message
-            fake_message = Message(
-                message_id=callback.message.message_id,
-                date=callback.message.date,
-                chat=callback.message.chat,
-                from_user=callback.from_user,  # Это важно! Используем реального пользователя
-                text="/users"
-            )
-            await cmd_users(fake_message)
+            await send_users_list(user_id, callback.message.chat.id)
             
         elif action == "broadcast":
             # Запускаем рассылку
             logger.info(f"📢 Админ {user_id} запустил рассылку через кнопку")
-            # Создаем фиктивное сообщение с правильным user_id
-            from aiogram.types import Message
-            fake_message = Message(
-                message_id=callback.message.message_id,
-                date=callback.message.date,
-                chat=callback.message.chat,
-                from_user=callback.from_user,
-                text="/broadcast"
-            )
-            await cmd_broadcast(fake_message, state)
+            await start_broadcast(user_id, callback.message.chat.id, state)
             
         elif action == "backup":
             # Создаем бэкап
             logger.info(f"💾 Админ {user_id} создал бэкап через кнопку")
-            # Создаем фиктивное сообщение с правильным user_id
-            from aiogram.types import Message
-            fake_message = Message(
-                message_id=callback.message.message_id,
-                date=callback.message.date,
-                chat=callback.message.chat,
-                from_user=callback.from_user,
-                text="/backup"
-            )
-            await cmd_backup(fake_message)
+            await create_backup(user_id, callback.message.chat.id)
             
         elif action == "logs":
             # Показываем логи (упрощенная версия)
             logger.info(f"📋 Админ {user_id} запросил логи через кнопку")
-            try:
-                if os.path.exists(Config.LOG_FILE):
-                    with open(Config.LOG_FILE, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()[-50:]  # Последние 50 строк
-                    
-                    log_text = "".join(lines[-20:])  # Показываем последние 20 строк
-                    
-                    if len(log_text) > 4000:
-                        log_text = log_text[-4000:]
-                    
-                    text = f"📋 Последние логи:\n```\n{log_text}\n```"
-                    await callback.message.answer(text)
-                else:
-                    await callback.message.answer("📭 Файл логов не найден.")
-            except Exception as e:
-                await callback.message.answer(f"❌ Ошибка чтения логов: {e}")
+            await show_logs(callback.message.chat.id)
                 
         elif action == "cleanup":
             # Очистка старых данных
             logger.info(f"🧹 Админ {user_id} открыл меню очистки через кнопку")
-            builder = InlineKeyboardBuilder()
-            if language == 'ru':
-                builder.row(
-                    InlineKeyboardButton(text="🗑️ Удалить старые напоминания", callback_data="cleanup_old"),
-                    InlineKeyboardButton(text="🧹 Очистить логи", callback_data="cleanup_logs"),
-                )
-                builder.row(
-                    InlineKeyboardButton(text="📋 Показать размер БД", callback_data="cleanup_stats"),
-                    InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"),
-                )
-            else:
-                builder.row(
-                    InlineKeyboardButton(text="🗑️ Delete old reminders", callback_data="cleanup_old"),
-                    InlineKeyboardButton(text="🧹 Clean logs", callback_data="cleanup_logs"),
-                )
-                builder.row(
-                    InlineKeyboardButton(text="📋 Show DB size", callback_data="cleanup_stats"),
-                    InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel"),
-                )
-            
-            text = {
-                'ru': "🧹 Очистка данных\n\nВыберите действие:",
-                'en': "🧹 Data Cleanup\n\nSelect action:"
-            }
-            
-            await callback.message.edit_text(
-                text.get(language, text['ru']),
-                reply_markup=builder.as_markup()
-            )
+            await show_cleanup_menu(callback.message, language)
             
         elif action == "restart":
             # Перезапуск проверки напоминаний
             logger.info(f"🔄 Админ {user_id} перезапустил проверку напоминаний через кнопку")
-            await callback.message.answer("🔄 Перезапускаю проверку напоминаний...")
-            await check_and_send_reminders()
-            await callback.message.answer("✅ Проверка напоминаний завершена.")
+            await restart_reminder_check(callback.message.chat.id)
             
         elif action == "settings":
             # Настройки
             logger.info(f"⚙️ Админ {user_id} запросил настройки через кнопку")
-            text = {
-                'ru': f"""⚙️ Настройки бота
+            await show_settings(callback.message.chat.id, language)
+            
+        elif action == "cancel":
+            await callback.message.delete()
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки админ-кнопки {action}: {e}", exc_info=True)
+        await bot.send_message(callback.message.chat.id, f"❌ Ошибка: {e}")
+
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ АДМИН-КНОПОК =====
+
+async def send_admin_stats(user_id: int, chat_id: int):
+    """Отправить админскую статистику"""
+    try:
+        # Получаем статистику из БД
+        stats = db.get_bot_statistics()
+        
+        # Получаем системную информацию
+        import psutil
+        import platform
+        
+        # Использование памяти
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        # Время работы бота
+        import time
+        start_time = getattr(send_admin_stats, '_start_time', time.time())
+        uptime_seconds = time.time() - start_time
+        uptime_str = str(timedelta(seconds=int(uptime_seconds)))
+        
+        user = db.get_user(user_id)
+        language = user.get('language_code', 'ru') if user else 'ru'
+        
+        if language == 'ru':
+            stats_text = f"""📊 *Статистика бота (Админ)*
+
+👥 *Пользователи:*
+• Всего: {stats.get('total_users', 0)}
+• Активных за неделю: {stats.get('active_week', 0)}
+• Новых сегодня: {stats.get('new_today', 0)}
+
+🔔 *Напоминания:*
+• Всего: {stats.get('total_reminders', 0)}
+• Активных: {stats.get('active_reminders', 0)}
+• Повторяющихся: {stats.get('repeating_reminders', 0)}
+• На паузе: {stats.get('paused_reminders', 0)}
+• Создано сегодня: {stats.get('created_today', 0)}
+
+💻 *Система:*
+• Время работы: {uptime_str}
+• Память: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)
+• Диск: {disk.percent}% ({disk.used//1024//1024}MB/{disk.total//1024//1024}MB)
+• ОС: {platform.system()} {platform.release()}
+
+📈 *Лимиты:*
+• Макс. напоминаний: {Config.MAX_REMINDERS_PER_USER}
+• Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}"""
+        else:
+            stats_text = f"""📊 *Bot Statistics (Admin)*
+
+👥 *Users:*
+• Total: {stats.get('total_users', 0)}
+• Active this week: {stats.get('active_week', 0)}
+• New today: {stats.get('new_today', 0)}
+
+🔔 *Reminders:*
+• Total: {stats.get('total_reminders', 0)}
+• Active: {stats.get('active_reminders', 0)}
+• Repeating: {stats.get('repeating_reminders', 0)}
+• Paused: {stats.get('paused_reminders', 0)}
+• Created today: {stats.get('created_today', 0)}
+
+💻 *System:*
+• Uptime: {uptime_str}
+• Memory: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)
+• Disk: {disk.percent}% ({disk.used//1024//1024}MB/{disk.total//1024//1024}MB)
+• OS: {platform.system()} {platform.release()}
+
+📈 *Limits:*
+• Max reminders: {Config.MAX_REMINDERS_PER_USER}
+• Default timezone: {Config.DEFAULT_TIMEZONE}"""
+        
+        await bot.send_message(chat_id, stats_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error in admin stats: {e}", exc_info=True)
+        error_text = {
+            'ru': f"❌ Ошибка получения статистики: {e}",
+            'en': f"❌ Error getting statistics: {e}"
+        }
+        user = db.get_user(user_id)
+        language = user.get('language_code', 'ru') if user else 'ru'
+        await bot.send_message(chat_id, error_text.get(language, error_text['ru']))
+
+# Сохраняем время запуска для статистики
+import time
+send_admin_stats._start_time = time.time()
+
+async def send_users_list(user_id: int, chat_id: int):
+    """Отправить список пользователей"""
+    try:
+        # Получаем пользователей
+        users = db.get_all_users(limit=20)
+        
+        if not users:
+            await bot.send_message(chat_id, "📭 Нет пользователей в базе данных.")
+            return
+        
+        user = db.get_user(user_id)
+        language = user.get('language_code', 'ru') if user else 'ru'
+        
+        # Формируем текст БЕЗ Markdown разметки
+        if language == 'ru':
+            text = f"👥 Последние 20 пользователей (всего: {len(users)}):\n\n"
+            for i, user_data in enumerate(users, 1):
+                username = user_data.get('username', '')
+                username_display = f"@{username}" if username else "без username"
+                
+                # Экранируем специальные символы
+                first_name = user_data.get('first_name', '')
+                first_name = first_name.replace('*', '•').replace('_', ' ')
+                
+                last_name = user_data.get('last_name', '')
+                if last_name:
+                    last_name = last_name.replace('*', '•').replace('_', ' ')
+                
+                reg_date = user_data['registered_at']
+                if isinstance(reg_date, str):
+                    try:
+                        reg_date = datetime.fromisoformat(reg_date)
+                    except:
+                        pass
+                
+                if isinstance(reg_date, datetime):
+                    reg_str = reg_date.strftime("%d.%m.%Y")
+                else:
+                    reg_str = str(reg_date)[:10]
+                
+                text += f"{i}. ID: {user_data['user_id']}\n"
+                text += f"   👤 {first_name} {last_name}\n"
+                text += f"   📱 {username_display}\n"
+                text += f"   🌐 {user_data.get('language_code', 'ru')}\n"
+                text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
+                text += f"   📅 Регистрация: {reg_str}\n"
+                text += f"   🔔 Напоминаний: {user_data.get('reminder_count', 0)}\n\n"
+        else:
+            text = f"👥 Last 20 users (total: {len(users)}):\n\n"
+            for i, user_data in enumerate(users, 1):
+                username = user_data.get('username', '')
+                username_display = f"@{username}" if username else "no username"
+                
+                # Экранируем специальные символы
+                first_name = user_data.get('first_name', '')
+                first_name = first_name.replace('*', '•').replace('_', ' ')
+                
+                last_name = user_data.get('last_name', '')
+                if last_name:
+                    last_name = last_name.replace('*', '•').replace('_', ' ')
+                
+                reg_date = user_data['registered_at']
+                if isinstance(reg_date, str):
+                    try:
+                        reg_date = datetime.fromisoformat(reg_date)
+                    except:
+                        pass
+                
+                if isinstance(reg_date, datetime):
+                    reg_str = reg_date.strftime("%b %d, %Y")
+                else:
+                    reg_str = str(reg_date)[:10]
+                
+                text += f"{i}. ID: {user_data['user_id']}\n"
+                text += f"   👤 {first_name} {last_name}\n"
+                text += f"   📱 {username_display}\n"
+                text += f"   🌐 {user_data.get('language_code', 'en')}\n"
+                text += f"   🕒 {user_data.get('timezone', 'UTC')}\n"
+                text += f"   📅 Registered: {reg_str}\n"
+                text += f"   🔔 Reminders: {user_data.get('reminder_count', 0)}\n\n"
+        
+        # Отправляем как обычный текст (без Markdown парсинга)
+        await bot.send_message(chat_id, text)
+        
+    except Exception as e:
+        logger.error(f"Error getting users: {e}", exc_info=True)
+        await bot.send_message(chat_id, f"❌ Ошибка получения списка пользователей: {e}")
+
+async def start_broadcast(user_id: int, chat_id: int, state: FSMContext):
+    """Начать рассылку"""
+    # Создаем фиктивное сообщение для запуска рассылки
+    from aiogram.types import Message
+    fake_message = Message(
+        message_id=1,
+        date=datetime.now(),
+        chat=types.Chat(id=chat_id, type="private"),
+        from_user=types.User(id=user_id, is_bot=False, first_name="Admin"),
+        text="/broadcast"
+    )
+    # Привязываем бота к сообщению
+    fake_message.bot = bot
+    
+    await cmd_broadcast(fake_message, state)
+
+async def create_backup(user_id: int, chat_id: int):
+    """Создать резервную копию"""
+    # Создаем фиктивное сообщение
+    from aiogram.types import Message
+    fake_message = Message(
+        message_id=1,
+        date=datetime.now(),
+        chat=types.Chat(id=chat_id, type="private"),
+        from_user=types.User(id=user_id, is_bot=False, first_name="Admin"),
+        text="/backup"
+    )
+    fake_message.bot = bot
+    
+    await cmd_backup(fake_message)
+
+async def show_logs(chat_id: int):
+    """Показать логи"""
+    try:
+        if os.path.exists(Config.LOG_FILE):
+            with open(Config.LOG_FILE, 'r', encoding='utf-8') as f:
+                lines = f.readlines()[-50:]  # Последние 50 строк
+            
+            log_text = "".join(lines[-20:])  # Показываем последние 20 строк
+            
+            if len(log_text) > 4000:
+                log_text = log_text[-4000:]
+            
+            text = f"📋 Последние логи:\n```\n{log_text}\n```"
+            await bot.send_message(chat_id, text)
+        else:
+            await bot.send_message(chat_id, "📭 Файл логов не найден.")
+    except Exception as e:
+        await bot.send_message(chat_id, f"❌ Ошибка чтения логов: {e}")
+
+async def show_cleanup_menu(message: types.Message, language: str):
+    """Показать меню очистки"""
+    builder = InlineKeyboardBuilder()
+    if language == 'ru':
+        builder.row(
+            InlineKeyboardButton(text="🗑️ Удалить старые напоминания", callback_data="cleanup_old"),
+            InlineKeyboardButton(text="🧹 Очистить логи", callback_data="cleanup_logs"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📋 Показать размер БД", callback_data="cleanup_stats"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"),
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="🗑️ Delete old reminders", callback_data="cleanup_old"),
+            InlineKeyboardButton(text="🧹 Clean logs", callback_data="cleanup_logs"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="📋 Show DB size", callback_data="cleanup_stats"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel"),
+        )
+    
+    text = {
+        'ru': "🧹 Очистка данных\n\nВыберите действие:",
+        'en': "🧹 Data Cleanup\n\nSelect action:"
+    }
+    
+    await message.edit_text(
+        text.get(language, text['ru']),
+        reply_markup=builder.as_markup()
+    )
+
+async def restart_reminder_check(chat_id: int):
+    """Перезапустить проверку напоминаний"""
+    await bot.send_message(chat_id, "🔄 Перезапускаю проверку напоминаний...")
+    await check_and_send_reminders()
+    await bot.send_message(chat_id, "✅ Проверка напоминаний завершена.")
+
+async def show_settings(chat_id: int, language: str):
+    """Показать настройки"""
+    text = {
+        'ru': f"""⚙️ Настройки бота
 
 • Макс. напоминаний на пользователя: {Config.MAX_REMINDERS_PER_USER}
 • Часовой пояс по умолчанию: {Config.DEFAULT_TIMEZONE}
@@ -2294,7 +2329,7 @@ async def handle_admin_buttons(callback: types.CallbackQuery, state: FSMContext)
 /set_limit <число> - изменить лимит
 /set_timezone <tz> - изменить часовой пояс
 /set_loglevel <level> - изменить уровень логов""",
-                'en': f"""⚙️ Bot Settings
+        'en': f"""⚙️ Bot Settings
 
 • Max reminders per user: {Config.MAX_REMINDERS_PER_USER}
 • Default timezone: {Config.DEFAULT_TIMEZONE}
@@ -2306,18 +2341,9 @@ Commands to change:
 /set_limit <number> - change limit
 /set_timezone <tz> - change timezone
 /set_loglevel <level> - change log level"""
-            }
-            
-            await callback.message.answer(
-                text.get(language, text['ru'])
-            )
-            
-        elif action == "cancel":
-            await callback.message.delete()
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки админ-кнопки {action}: {e}", exc_info=True)
-        await callback.message.answer(f"❌ Ошибка: {e}")
+    }
+    
+    await bot.send_message(chat_id, text.get(language, text['ru']))
 
 @dp.message(Command("find_user"))
 async def cmd_find_user(message: types.Message):
