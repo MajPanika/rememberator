@@ -83,7 +83,7 @@ async def admin_only(handler):
         logger.debug(f"🔍 Проверка прав админа через декоратор для user_id: {user_id}")
         
         if not is_admin(user_id):
-            logger.warning(f"⛔ Пользователь {user_id} не админ, пытался использовать админ-команду")
+            logger.warning(f"⛔ Пользователь {user_id} не админ, пытался использовать админ-команду: {message.text}")
             await message.answer("⛔ У вас нет прав администратора.")
             return
         logger.debug(f"✅ Пользователь {user_id} прошел проверку админских прав")
@@ -1826,7 +1826,10 @@ cmd_stats_admin._start_time = time.time()
 @dp.message(Command("users"))
 async def cmd_users(message: types.Message):
     """Список пользователей"""
+    logger.info(f"📋 Запрос списка пользователей от user_id={message.from_user.id}")
+    
     if not is_admin(message.from_user.id):
+        logger.warning(f"⛔ Пользователь {message.from_user.id} не админ, пытался получить список пользователей")
         await message.answer("⛔ У вас нет прав администратора.")
         return
     
