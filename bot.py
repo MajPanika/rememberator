@@ -139,13 +139,27 @@ async def send_reminder_notification(reminder: dict):
         logger.info(f"Отправка напоминания {reminder['id']} пользователю {reminder['user_id']}")
         logger.info(f"  Текст: {reminder['text']}")
         logger.info(f"  Часовой пояс пользователя: {user_timezone}")
+        logger.info(f"  Тип повторения: {reminder.get('repeat_type', 'once')}")
+        logger.info(f"  Дни повторения: {reminder.get('repeat_days')}")
         
         # Проблема: remind_time_utc может быть строкой или datetime
         remind_time = reminder['remind_time_utc']
+        logger.info(f"  Время из БД (сырое): {remind_time}, тип: {type(remind_time)}")
+        
         if isinstance(remind_time, str):
-            remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
-            # Делаем aware (с часовым поясом UTC)
-            remind_time = pytz.UTC.localize(remind_time)
+            try:
+                remind_time = datetime.fromisoformat(remind_time.replace('Z', '+00:00'))
+                # Делаем aware (с часовым поясом UTC)
+                remind_time = pytz.UTC.localize(remind_time)
+            except Exception as e:
+                logger.error(f"Ошибка парсинга времени из строки: {e}")
+                try:
+                    remind_time = datetime.strptime(remind_time, '%Y-%m-%d %H:%M:%S')
+                    remind_time = pytz.UTC.localize(remind_time)
+                except Exception as e2:
+                    logger.error(f"Вторая попытка парсинга тоже не удалась: {e2}")
+                    # Если все плохо, используем текущее время
+                    remind_time = datetime.now(pytz.UTC)
         
         # Если это naive datetime, добавляем UTC
         if remind_time.tzinfo is None:
@@ -155,8 +169,9 @@ async def send_reminder_notification(reminder: dict):
         user_tz = pytz.timezone(user_timezone)
         local_time = remind_time.astimezone(user_tz)
         
-        logger.info(f"  Время UTC в БД: {remind_time}")
+        logger.info(f"  Время UTC: {remind_time}")
         logger.info(f"  Местное время пользователя: {local_time}")
+        logger.info(f"  Разница: {(local_time - remind_time).total_seconds()/3600} часов")
         
         formatted_time = format_local_time(remind_time, user_timezone, user_lang)
         
@@ -193,7 +208,6 @@ async def send_reminder_notification(reminder: dict):
                 SET error_count = error_count + 1 
                 WHERE id = ?
             ''', (reminder['id'],))
-
 async def check_and_send_reminders():
     """Проверить и отправить напоминания, которые подошли по времени"""
     try:
@@ -3245,6 +3259,9 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         if parsed_time.tzinfo is None:
             # Если время naive, добавляем часовой пояс пользователя
             parsed_time = user_tz.localize(parsed_time)
+        else:
+            # Если уже есть часовой пояс, конвертируем в часовой пояс пользователя
+            parsed_time = parsed_time.astimezone(user_tz)
         
         # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ И СЕКУНДЫ
         # Приводим к целым минутам
@@ -3257,6 +3274,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         logger.info(f"Создание напоминания: пользователь {user_id}")
         logger.info(f"  Местное время: {parsed_time} ({timezone})")
         logger.info(f"  UTC время: {utc_time}")
+        logger.info(f"  Разница: {(parsed_time - utc_time).total_seconds()/3600} часов")
         
         # Для тестирования: если время в прошлом, добавляем 1 минуту
         now_utc = datetime.now(pytz.UTC).replace(second=0, microsecond=0)
@@ -3312,7 +3330,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
             'en': f"🎉 *Reminder created!*\n\n"
                   f"📝 *Text:* {text}\n"
                   f"⏰ *Time:* {formatted_time}\n"
-                  f"🔄 *Type:* {repeat_text}\n"
+                  f"🔄 *Тип:* {repeat_text}\n"
                   f"🆔 *ID:* {reminder_id}\n\n"
                   f"Use /list to view all reminders."
         }
@@ -3343,7 +3361,6 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         )
         
         logger.error(f"Failed to create reminder for user {user_id}: {e}", exc_info=True)
-
 # ===== ПЛАНИРОВЩИК =====
 
 def start_scheduler():
