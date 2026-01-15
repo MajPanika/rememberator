@@ -275,8 +275,17 @@ class Database:
             if count >= Config.MAX_REMINDERS_PER_USER:
                 raise ValueError(f"Достигнут лимит в {Config.MAX_REMINDERS_PER_USER} напоминаний")
             
-            # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ ЕЩЕ РАЗ (на всякий случай)
-            remind_time_utc = remind_time_utc.replace(microsecond=0)
+            # ВАЖНО: убеждаемся, что время в UTC
+            import pytz
+            if remind_time_utc.tzinfo is None:
+                # Если naive datetime, считаем что это уже UTC
+                remind_time_utc = pytz.UTC.localize(remind_time_utc)
+            else:
+                # Если с часовым поясом, конвертируем в UTC
+                remind_time_utc = remind_time_utc.astimezone(pytz.UTC)
+            
+            # ✅ ОБНУЛЯЕМ МИКРОСЕКУНДЫ И СЕКУНДЫ
+            remind_time_utc = remind_time_utc.replace(second=0, microsecond=0)
             
             # Определяем следующее время для повторяющихся напоминаний
             next_remind_time = remind_time_utc
@@ -286,12 +295,12 @@ class Database:
                 )
                 # ✅ И для следующего времени тоже обнуляем
                 if next_remind_time:
-                    next_remind_time = next_remind_time.replace(microsecond=0)
+                    next_remind_time = next_remind_time.replace(second=0, microsecond=0)
             
-            # ✅ Сохраняем как строку БЕЗ часового пояса в формате SQLite
-            # SQLite прекрасно работает с таким форматом
-            remind_time_str = remind_time_utc.strftime('%Y-%m-%d %H:%M:%S')
-            next_time_str = next_remind_time.strftime('%Y-%m-%d %H:%M:%S') if next_remind_time else remind_time_str
+            # ✅ Сохраняем как строку в формате SQLite
+            # Используем isoformat для корректного сохранения
+            remind_time_str = remind_time_utc.isoformat()
+            next_time_str = next_remind_time.isoformat() if next_remind_time else remind_time_str
             
             # Добавляем напоминание в БД
             cursor.execute('''
@@ -313,6 +322,7 @@ class Database:
             
             logger.info(f"🔔 Добавлено напоминание {reminder_id} для пользователя {user_id}")
             logger.info(f"   Сохранено время (UTC, без микросекунд): {remind_time_str}")
+            logger.info(f"   Часы: {remind_time_utc.hour}, минуты: {remind_time_utc.minute}")
             
             return reminder_id
     
@@ -613,8 +623,6 @@ class Database:
                                    repeat_days: str, repeat_interval: int) -> datetime:
         """
         Рассчитать следующее время для повторяющегося напоминания.
-        
-        ВАЖНО: Все времена должны быть в UTC для корректного хранения в БД.
         """
         try:
             # Убедимся, что время в UTC
@@ -625,6 +633,9 @@ class Database:
             else:
                 # Конвертируем в UTC если нужно
                 current_time = current_time.astimezone(pytz.UTC)
+            
+            # Обнуляем микросекунды и секунды
+            current_time = current_time.replace(second=0, microsecond=0)
             
             if repeat_type == 'daily':
                 # Ежедневное: добавляем дни в UTC
@@ -665,16 +676,22 @@ class Database:
             if next_time.tzinfo is None:
                 next_time = pytz.UTC.localize(next_time)
             
-            next_time = next_time.replace(microsecond=0)
+            next_time = next_time.replace(second=0, microsecond=0)
+            
+            logger.info(f"  Следующее время для повторяющегося напоминания:")
+            logger.info(f"    Текущее: {current_time}")
+            logger.info(f"    Следующее: {next_time}")
+            logger.info(f"    Часы: {next_time.hour}, минуты: {next_time.minute}")
+            
             return next_time
-        
-    except Exception as e:
-        logger.error(f"Ошибка расчета следующего времени: {e}")
-        # В случае ошибки возвращаем время через день в UTC
-        next_time = (current_time + timedelta(days=1)).replace(microsecond=0)
-        if next_time.tzinfo is None:
-            next_time = pytz.UTC.localize(next_time)
-        return next_time
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета следующего времени: {e}")
+            # В случае ошибки возвращаем время через день в UTC
+            next_time = (current_time + timedelta(days=1)).replace(second=0, microsecond=0)
+            if next_time.tzinfo is None:
+                next_time = pytz.UTC.localize(next_time)
+            return next_time
     
     def backup_database(self):
         """Создать резервную копию базы данных"""
