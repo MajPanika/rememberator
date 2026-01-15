@@ -360,90 +360,96 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Простой запрос - теперь времена в одном формате
+            # ВАЖНО: Используем next_remind_time_utc для повторяющихся напоминаний
+            # но в запросе сравниваем с текущим временем
             cursor.execute('''
                 SELECT r.*, u.timezone, u.language_code 
                 FROM reminders r
                 JOIN users u ON r.user_id = u.user_id
                 WHERE r.is_active = 1 
                 AND r.is_paused = 0
-                AND r.next_remind_time_utc <= datetime('now')
-                ORDER BY r.next_remind_time_utc
+                AND (
+                    (r.repeat_type = 'once' AND r.remind_time_utc <= datetime('now')) 
+                    OR 
+                    (r.repeat_type != 'once' AND r.next_remind_time_utc <= datetime('now'))
+                )
+                ORDER BY 
+                    CASE 
+                        WHEN r.repeat_type != 'once' THEN r.next_remind_time_utc 
+                        ELSE r.remind_time_utc 
+                    END
             ''')
             
             results = cursor.fetchall()
             reminders = [dict(row) for row in results]
             
             if reminders:
+                logger.info("=" * 50)
                 logger.info(f"🎯 Найдено {len(reminders)} напоминаний для отправки")
                 for reminder in reminders:
-                    logger.info(f"   • ID {reminder['id']}: {reminder['text'][:30]}... "
-                              f"в {reminder.get('next_remind_time_utc')}")
+                    repeat_type = reminder['repeat_type']
+                    if repeat_type == 'once':
+                        time_field = reminder['remind_time_utc']
+                        time_type = "разовое"
+                    else:
+                        time_field = reminder.get('next_remind_time_utc', reminder['remind_time_utc'])
+                        time_type = f"повторяющееся ({repeat_type})"
+                    
+                    logger.info(f"   • ID {reminder['id']}: {reminder['text'][:30]}...")
+                    logger.info(f"     Время: {time_field} ({time_type})")
+                logger.info("=" * 50)
             else:
                 logger.info("📭 Нет напоминаний для отправки")
             
             return reminders
     
-    def mark_reminder_sent(self, reminder_id: int):
-        """Пометить напоминание как отправленное и обновить следующее время"""
+    def get_due_reminders(self) -> List[Dict]:
+        """Получить напоминания, которые нужно отправить сейчас"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Сначала получаем информацию о напоминании
+            # ВАЖНО: Используем next_remind_time_utc для повторяющихся напоминаний
+            # но в запросе сравниваем с текущим временем
             cursor.execute('''
-                SELECT repeat_type, next_remind_time_utc, remind_time_utc
-                FROM reminders 
-                WHERE id = ? AND is_active = 1
-            ''', (reminder_id,))
+                SELECT r.*, u.timezone, u.language_code 
+                FROM reminders r
+                JOIN users u ON r.user_id = u.user_id
+                WHERE r.is_active = 1 
+                AND r.is_paused = 0
+                AND (
+                    (r.repeat_type = 'once' AND r.remind_time_utc <= datetime('now')) 
+                    OR 
+                    (r.repeat_type != 'once' AND r.next_remind_time_utc <= datetime('now'))
+                )
+                ORDER BY 
+                    CASE 
+                        WHEN r.repeat_type != 'once' THEN r.next_remind_time_utc 
+                        ELSE r.remind_time_utc 
+                    END
+            ''')
             
-            row = cursor.fetchone()
-            if not row:
-                logger.warning(f"⚠️ Напоминание {reminder_id} не найдено или не активно")
-                return
+            results = cursor.fetchall()
+            reminders = [dict(row) for row in results]
             
-            repeat_type = row['repeat_type']
-            next_remind_time = row['next_remind_time_utc']
-            
-            # Для разовых напоминаний - деактивируем
-            if repeat_type == 'once':
-                cursor.execute('''
-                    UPDATE reminders 
-                    SET is_active = 0,
-                        notified_count = notified_count + 1,
-                        last_processed = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                ''', (reminder_id,))
-                logger.info(f"✅ Разовое напоминание {reminder_id} выполнено и деактивировано")
-            
-            # Для повторяющихся - обновляем следующее время
+            if reminders:
+                logger.info("=" * 50)
+                logger.info(f"🎯 Найдено {len(reminders)} напоминаний для отправки")
+                for reminder in reminders:
+                    repeat_type = reminder['repeat_type']
+                    if repeat_type == 'once':
+                        time_field = reminder['remind_time_utc']
+                        time_type = "разовое"
+                    else:
+                        time_field = reminder.get('next_remind_time_utc', reminder['remind_time_utc'])
+                        time_type = f"повторяющееся ({repeat_type})"
+                    
+                    logger.info(f"   • ID {reminder['id']}: {reminder['text'][:30]}...")
+                    logger.info(f"     Время: {time_field} ({time_type})")
+                logger.info("=" * 50)
             else:
-                cursor.execute('''
-                    SELECT repeat_type, repeat_days, repeat_interval
-                    FROM reminders 
-                    WHERE id = ?
-                ''', (reminder_id,))
-                
-                repeat_info = cursor.fetchone()
-                if repeat_info:
-                    # Рассчитываем следующее время напоминания
-                    next_time = self._calculate_next_remind_time(
-                        next_remind_time,
-                        repeat_info['repeat_type'],
-                        repeat_info['repeat_days'],
-                        repeat_info['repeat_interval']
-                    )
-                    
-                    # Обновляем запись
-                    cursor.execute('''
-                        UPDATE reminders 
-                        SET notified_count = notified_count + 1,
-                            last_processed = CURRENT_TIMESTAMP,
-                            next_remind_time_utc = ?
-                        WHERE id = ?
-                    ''', (next_time, reminder_id))
-                    
-                    logger.info(f"🔄 Обновлено повторяющееся напоминание {reminder_id}, "
-                               f"следующее время: {next_time}")
+                logger.info("📭 Нет напоминаний для отправки")
+            
+            return reminders
     
     def delete_reminder(self, reminder_id: int, user_id: int) -> bool:
         """Удалить напоминание"""
@@ -623,6 +629,7 @@ class Database:
                                    repeat_days: str, repeat_interval: int) -> datetime:
         """
         Рассчитать следующее время для повторяющегося напоминания.
+        ВАЖНО: Сохраняем час и минуты из исходного времени!
         """
         try:
             # Убедимся, что время в UTC
@@ -634,12 +641,18 @@ class Database:
                 # Конвертируем в UTC если нужно
                 current_time = current_time.astimezone(pytz.UTC)
             
-            # Обнуляем микросекунды и секунды
+            # Сохраняем оригинальные час и минуты
+            original_hour = current_time.hour
+            original_minute = current_time.minute
+            
+            # Обнуляем секунды и микросекунды
             current_time = current_time.replace(second=0, microsecond=0)
             
             if repeat_type == 'daily':
-                # Ежедневное: добавляем дни в UTC
+                # ВАЖНО: Для ежедневных добавляем дни, но сохраняем час и минуты
                 next_time = current_time + timedelta(days=repeat_interval)
+                # Убедимся, что час и минуты сохранились
+                next_time = next_time.replace(hour=original_hour, minute=original_minute)
                 
             elif repeat_type == 'weekly':
                 if repeat_days:
@@ -664,9 +677,13 @@ class Database:
                         days_ahead = next_day - current_weekday
                     
                     next_time = current_time + timedelta(days=days_ahead)
+                    # Сохраняем час и минуты
+                    next_time = next_time.replace(hour=original_hour, minute=original_minute)
                 else:
                     # Если дни не указаны, просто +7 дней
                     next_time = current_time + timedelta(days=7)
+                    # Сохраняем час и минуты
+                    next_time = next_time.replace(hour=original_hour, minute=original_minute)
             
             else:
                 # Для разовых или неизвестных типов возвращаем None
@@ -678,15 +695,15 @@ class Database:
             
             next_time = next_time.replace(second=0, microsecond=0)
             
-            logger.info(f"  Следующее время для повторяющегося напоминания:")
-            logger.info(f"    Текущее: {current_time}")
-            logger.info(f"    Следующее: {next_time}")
-            logger.info(f"    Часы: {next_time.hour}, минуты: {next_time.minute}")
+            logger.info(f"  🔄 Расчет следующего времени:")
+            logger.info(f"    Текущее: {current_time} (час: {original_hour}, мин: {original_minute})")
+            logger.info(f"    Следующее: {next_time} (час: {next_time.hour}, мин: {next_time.minute})")
+            logger.info(f"    Тип: {repeat_type}, интервал: {repeat_interval}")
             
             return next_time
             
         except Exception as e:
-            logger.error(f"Ошибка расчета следующего времени: {e}")
+            logger.error(f"❌ Ошибка расчета следующего времени: {e}", exc_info=True)
             # В случае ошибки возвращаем время через день в UTC
             next_time = (current_time + timedelta(days=1)).replace(second=0, microsecond=0)
             if next_time.tzinfo is None:
