@@ -1898,7 +1898,7 @@ async def process_timezone(message: types.Message, state: FSMContext):
     
     # Проверяем валидность часового пояса
     try:
-        import pytz
+        
         tz = pytz.timezone(timezone_input)
         
         # Обновляем часовой пояс пользователя
