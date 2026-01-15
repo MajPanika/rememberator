@@ -614,18 +614,20 @@ class Database:
         """
         Рассчитать следующее время для повторяющегося напоминания.
         
-        Args:
-            current_time: Текущее время напоминания
-            repeat_type: Тип повторения ('daily', 'weekly')
-            repeat_days: Дни недели для еженедельных напоминаний (например, "0,2,4")
-            repeat_interval: Интервал повторения (например, 2 для каждого второго дня)
-            
-        Returns:
-            datetime: Следующее время напоминания
+        ВАЖНО: Все времена должны быть в UTC для корректного хранения в БД.
         """
         try:
+            # Убедимся, что время в UTC
+            import pytz
+            if current_time.tzinfo is None:
+                # Если naive datetime, считаем что это UTC
+                current_time = pytz.UTC.localize(current_time)
+            else:
+                # Конвертируем в UTC если нужно
+                current_time = current_time.astimezone(pytz.UTC)
+            
             if repeat_type == 'daily':
-                # Ежедневное: добавляем дни
+                # Ежедневное: добавляем дни в UTC
                 next_time = current_time + timedelta(days=repeat_interval)
                 
             elif repeat_type == 'weekly':
@@ -633,7 +635,7 @@ class Database:
                     # Получаем список дней недели (0=понедельник, 6=воскресенье)
                     days_list = [int(d) for d in repeat_days.split(',')]
                     
-                    # Текущий день недели
+                    # Текущий день недели в UTC
                     current_weekday = current_time.weekday()
                     
                     # Ищем следующий день из списка
@@ -659,13 +661,20 @@ class Database:
                 # Для разовых или неизвестных типов возвращаем None
                 return None
                 
+            # Убедимся, что следующее время тоже в UTC
+            if next_time.tzinfo is None:
+                next_time = pytz.UTC.localize(next_time)
+            
             next_time = next_time.replace(microsecond=0)
             return next_time
-            
-        except Exception as e:
-            logger.error(f"Ошибка расчета следующего времени: {e}")
-            # В случае ошибки возвращаем время через день
-            return (current_time + timedelta(days=1)).replace(microsecond=0)
+        
+    except Exception as e:
+        logger.error(f"Ошибка расчета следующего времени: {e}")
+        # В случае ошибки возвращаем время через день в UTC
+        next_time = (current_time + timedelta(days=1)).replace(microsecond=0)
+        if next_time.tzinfo is None:
+            next_time = pytz.UTC.localize(next_time)
+        return next_time
     
     def backup_database(self):
         """Создать резервную копию базы данных"""
