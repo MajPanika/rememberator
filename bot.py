@@ -2243,6 +2243,40 @@ async def handle_broadcast_confirmation(callback: types.CallbackQuery, state: FS
         
         await callback.answer()
 
+@dp.message(Command("db_check"))
+async def cmd_db_check(message: types.Message):
+    """Проверить данные в БД"""
+    user_id = message.from_user.id
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, text, repeat_type, 
+                   remind_time_utc, next_remind_time_utc,
+                   strftime('%H:%M', remind_time_utc) as original_time,
+                   strftime('%H:%M', next_remind_time_utc) as next_time
+            FROM reminders 
+            WHERE user_id = ? AND repeat_type != 'once'
+            ORDER BY id DESC
+        ''', (user_id,))
+        
+        reminders = cursor.fetchall()
+        
+        if not reminders:
+            await message.answer("📭 У вас нет повторяющихся напоминаний")
+            return
+        
+        result = "🔍 *Повторяющиеся напоминания в БД:*\n\n"
+        for r in reminders:
+            result += f"ID: {r['id']}\n"
+            result += f"Текст: {r['text']}\n"
+            result += f"Тип: {r['repeat_type']}\n"
+            result += f"Оригинальное время: {r['remind_time_utc']} ({r['original_time']})\n"
+            result += f"Следующее время: {r['next_remind_time_utc']} ({r['next_time']})\n"
+            result += "─" * 30 + "\n"
+        
+        await message.answer(result, parse_mode="Markdown")
+
 @dp.message(Command("backup"))
 async def cmd_backup(message: types.Message):
     """Создать резервную копию БД"""
