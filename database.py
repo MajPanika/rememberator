@@ -178,12 +178,14 @@ class Database:
             # Преобразуем в список словарей
             result = []
             for admin in admins:
+                # Получаем как dict из Row объекта
+                admin_dict = dict(admin)
                 result.append({
-                    'user_id': admin[0],
-                    'username': admin[1],
-                    'level': admin[2],
-                    'added_at': admin[3],
-                    'notes': admin[4]
+                    'user_id': admin_dict.get('user_id'),
+                    'username': admin_dict.get('username'),
+                    'level': admin_dict.get('level', 1),
+                    'added_at': admin_dict.get('added_at'),
+                    'notes': admin_dict.get('notes')
                 })
             return result
     
