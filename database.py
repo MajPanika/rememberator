@@ -166,6 +166,26 @@ class Database:
             logger.info("✅ База данных инициализирована")
     
     # ===== МЕТОДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =====
+    def get_all_admins(self):
+        """Получить всех администраторов"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM admins ORDER BY added_at DESC
+            ''')
+            admins = cursor.fetchall()
+            
+            # Преобразуем в список словарей
+            result = []
+            for admin in admins:
+                result.append({
+                    'user_id': admin[0],
+                    'username': admin[1],
+                    'level': admin[2],
+                    'added_at': admin[3],
+                    'notes': admin[4]
+                })
+            return result
     
     def add_user(self, user_id: int, username: str, first_name: str, 
                  last_name: str = None, language_code: str = 'ru',
