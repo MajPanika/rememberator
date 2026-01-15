@@ -3270,11 +3270,19 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         # Конвертируем в UTC
         utc_time = parsed_time.astimezone(pytz.UTC)
         
-        # Отладочная информация
-        logger.info(f"Создание напоминания: пользователь {user_id}")
-        logger.info(f"  Местное время: {parsed_time} ({timezone})")
+        # ВАЖНОЕ ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
+        logger.info("=" * 50)
+        logger.info("🔍 ОТЛАДКА СОЗДАНИЯ НАПОМИНАНИЯ")
+        logger.info(f"  Пользователь: {user_id}")
+        logger.info(f"  Текст: {text}")
+        logger.info(f"  Часовой пояс пользователя: {timezone}")
+        logger.info(f"  Исходное время (parsed_time): {parsed_time}")
+        logger.info(f"  Тип parsed_time.tzinfo: {type(parsed_time.tzinfo)}")
         logger.info(f"  UTC время: {utc_time}")
-        logger.info(f"  Разница: {(parsed_time - utc_time).total_seconds()/3600} часов")
+        logger.info(f"  Разница во времени: {(parsed_time - utc_time).total_seconds()/60} минут")
+        logger.info(f"  parsed_time.hour: {parsed_time.hour}, parsed_time.minute: {parsed_time.minute}")
+        logger.info(f"  utc_time.hour: {utc_time.hour}, utc_time.minute: {utc_time.minute}")
+        logger.info("=" * 50)
         
         # Для тестирования: если время в прошлом, добавляем 1 минуту
         now_utc = datetime.now(pytz.UTC).replace(second=0, microsecond=0)
@@ -3361,6 +3369,7 @@ async def create_reminder(user_id: int, text: str, parsed_time: datetime,
         )
         
         logger.error(f"Failed to create reminder for user {user_id}: {e}", exc_info=True)
+        
 # ===== ПЛАНИРОВЩИК =====
 
 def start_scheduler():
